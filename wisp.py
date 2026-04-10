@@ -511,9 +511,17 @@ def cli_plugin(args):
         sys.exit(1)
 
 
+VERSION = "0.1.0"
+
+
 def cli_main():
     """Route CLI subcommands before starting the daemon."""
     args = sys.argv[1:]
+
+    if "--version" in args or "-v" in args:
+        print(f"wisp {VERSION}")
+        sys.exit(0)
+
     # Filter out flags like --gpt
     positional = [a for a in args if not a.startswith("--")]
 
