@@ -30,7 +30,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. If no microphone is available or permission is denied, user sees an error message instead of a crash
 **Plans:** 3 plans
 Plans:
-- [ ] 01-01-PLAN.md -- Shell injection fix + privacy notice in onboarding
+- [x] 01-01-PLAN.md -- Shell injection fix + privacy notice in onboarding
 - [ ] 01-02-PLAN.md -- HUD error infrastructure + API timeout with retry
 - [ ] 01-03-PLAN.md -- CGEventTap health monitoring + microphone error handling
 
