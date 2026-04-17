@@ -1791,6 +1791,40 @@ def install_monitor():
     )
     Quartz.CGEventTapEnable(tap, True)
     print("Hotkey monitor installed.", flush=True)
+    return tap
+
+
+def _tap_health_check(tap):
+    """Poll CGEventTap health every 7s. Daemon thread -- exits with main process."""
+    tap_was_disabled = False
+    while True:
+        time.sleep(7)
+        try:
+            enabled = Quartz.CGEventTapIsEnabled(tap)
+        except Exception:
+            continue  # if tap reference becomes invalid, keep polling
+        if not enabled and not tap_was_disabled:
+            tap_was_disabled = True
+            # Attempt re-enable per D-10
+            try:
+                Quartz.CGEventTapEnable(tap, True)
+            except Exception:
+                pass
+            set_hud(True, mode="error_fatal", tooltip=_tooltip("accessibility_revoked"))
+            print("! Accessibility revoked -- attempting re-enable", flush=True)
+        elif not enabled and tap_was_disabled:
+            # Still disabled -- try re-enable again
+            try:
+                Quartz.CGEventTapEnable(tap, True)
+            except Exception:
+                pass
+        elif enabled and tap_was_disabled:
+            # Recovered! Clear error per D-11
+            tap_was_disabled = False
+            set_hud(False)
+            print("Accessibility restored.", flush=True)
+        # If enabled and was not disabled -- normal state, do nothing
+
 
 # ── Notes CLI (picker + voice amend) ─────────────────────────────────────────
 def _read_index_entries(limit=30):
@@ -2164,7 +2198,8 @@ if __name__ == "__main__":
 
     setup_hud()
     setup_predict()
-    install_monitor()
+    tap = install_monitor()
+    threading.Thread(target=_tap_health_check, args=(tap,), daemon=True).start()
 
     signal.signal(signal.SIGINT, lambda *_: os._exit(0))
     run_loop = AppKit.NSRunLoop.mainRunLoop()
