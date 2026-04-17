@@ -184,7 +184,7 @@ SETUP_STRINGS = {
 \033[2m         ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░\033[0m
 """,
         "step_keys": """
-\033[33m  ── Step 1/3 ─ API Keys ──────────────────────────────\033[0m
+\033[33m  ── Step 1/4 ─ API Keys ──────────────────────────────\033[0m
 
   Govori needs an OpenAI API key for speech-to-text.
   \033[2mOptionally, add an Anthropic key for smart note classification.\033[0m
@@ -194,8 +194,20 @@ SETUP_STRINGS = {
         "ask_openai": "  \033[1mOpenAI API key\033[0m (sk-...): ",
         "ask_anthropic": "  \033[1mAnthropic API key\033[0m (sk-ant-..., Enter to skip): ",
         "keys_saved": "\n  \033[32m✓ Keys saved to ~/.config/govori/env\033[0m\n",
+        "step_privacy": """
+\033[33m  ── Step 2/4 ─ Privacy Notice ────────────────────────\033[0m
+
+  Govori sends data to cloud APIs for processing:
+
+    \033[1mVoice audio\033[0m  -->  OpenAI Whisper API (speech-to-text)
+    \033[1mNote text\033[0m    -->  Anthropic Claude API (classification)
+
+  \033[2mAudio is not stored after transcription. Notes are processed
+  but not retained by Anthropic. Keys stay local on your machine.\033[0m
+
+""",
         "step_access": """
-\033[33m  ── Step 2/3 ─ Accessibility Permission ──────────────\033[0m
+\033[33m  ── Step 3/4 ─ Accessibility Permission ──────────────\033[0m
 
   Govori needs Accessibility access to listen for the \033[1mfn\033[0m key.
 
@@ -205,7 +217,7 @@ SETUP_STRINGS = {
 """,
         "ask_access_done": "  \033[2mPress Enter when done...\033[0m",
         "step_hotkeys": """
-\033[33m  ── Step 3/3 ─ How to Use ────────────────────────────\033[0m
+\033[33m  ── Step 4/4 ─ How to Use ────────────────────────────\033[0m
 
   \033[1mHold fn\033[0m         →  dictate → paste at cursor
   \033[1mOption + fn\033[0m     →  dictate → autocomplete menu \033[2m(3 suggestions)\033[0m
@@ -249,7 +261,7 @@ SETUP_STRINGS = {
 \033[2m         ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░\033[0m
 """,
         "step_keys": """
-\033[33m  ── Шаг 1/3 ─ API-ключи ─────────────────────────────\033[0m
+\033[33m  ── Шаг 1/4 ─ API-ключи ─────────────────────────────\033[0m
 
   Govori использует OpenAI API для распознавания речи.
   \033[2mОпционально: ключ Anthropic для умной классификации заметок.\033[0m
@@ -259,8 +271,20 @@ SETUP_STRINGS = {
         "ask_openai": "  \033[1mOpenAI API ключ\033[0m (sk-...): ",
         "ask_anthropic": "  \033[1mAnthropic API ключ\033[0m (sk-ant-..., Enter чтобы пропустить): ",
         "keys_saved": "\n  \033[32m✓ Ключи сохранены в ~/.config/govori/env\033[0m\n",
+        "step_privacy": """
+\033[33m  ── Шаг 2/4 ─ Конфиденциальность ─────────────────────\033[0m
+
+  Govori отправляет данные в облачные API для обработки:
+
+    \033[1mАудио голоса\033[0m  -->  OpenAI Whisper API (распознавание речи)
+    \033[1mТекст заметок\033[0m -->  Anthropic Claude API (классификация)
+
+  \033[2mАудио не сохраняется после транскрипции. Заметки обрабатываются,
+  но не хранятся на серверах Anthropic. Ключи остаются на вашем устройстве.\033[0m
+
+""",
         "step_access": """
-\033[33m  ── Шаг 2/3 ─ Разрешение Accessibility ──────────────\033[0m
+\033[33m  ── Шаг 3/4 ─ Разрешение Accessibility ──────────────\033[0m
 
   Govori нужен доступ к Accessibility чтобы слушать клавишу \033[1mfn\033[0m.
 
@@ -270,7 +294,7 @@ SETUP_STRINGS = {
 """,
         "ask_access_done": "  \033[2mНажми Enter когда готово...\033[0m",
         "step_hotkeys": """
-\033[33m  ── Шаг 3/3 ─ Как пользоваться ───────────────────────\033[0m
+\033[33m  ── Шаг 4/4 ─ Как пользоваться ───────────────────────\033[0m
 
   \033[1mЗажми fn\033[0m        →  диктовка → вставка в курсор
   \033[1mOption + fn\033[0m     →  диктовка → меню автодополнения \033[2m(3 варианта)\033[0m
@@ -368,11 +392,14 @@ def cli_setup(force=False):
         env_file.chmod(0o600)
         print(s["keys_saved"])
 
-    # Step 2: Accessibility
+    # Step 2: Privacy notice
+    print(s["step_privacy"])
+
+    # Step 3: Accessibility
     print(s["step_access"])
     _ask(s["ask_access_done"])
 
-    # Step 3: Hotkeys tutorial
+    # Step 4: Hotkeys tutorial
     print(s["step_hotkeys"])
 
     # Notes plugin
