@@ -1706,7 +1706,7 @@ _option_held = False
 
 
 def cg_event_callback(proxy, event_type, event, refcon):
-    global prev_fn_down, _fn_press_time, _shift_held, _option_held, note_mode
+    global prev_fn_down, _fn_press_time, _shift_held, _option_held, note_mode, predict_mode
     keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
     flags_now = Quartz.CGEventGetFlags(event)
 
@@ -1753,30 +1753,26 @@ def cg_event_callback(proxy, event_type, event, refcon):
 
     if is_down and not prev_fn_down:
         _fn_press_time = time.time()
-        def delayed_start():
-            time.sleep(0.25)
-            if not prev_fn_down:
-                return
-            global predict_mode, note_mode
-            if _shift_held and NOTES_CFG:
-                note_mode    = True
-                predict_mode = False
-            elif _option_held:
-                predict_mode = True
-                note_mode    = False
-            else:
-                predict_mode = False
-                note_mode    = False
-            print(
-                f"[mode] shift={_shift_held} option={_option_held} "
-                f"→ note={note_mode} predict={predict_mode}",
-                flush=True,
-            )
-            start_recording()
-        threading.Thread(target=delayed_start, daemon=True).start()
+        if _shift_held and NOTES_CFG:
+            note_mode    = True
+            predict_mode = False
+        elif _option_held:
+            predict_mode = True
+            note_mode    = False
+        else:
+            predict_mode = False
+            note_mode    = False
+        print(
+            f"[mode] shift={_shift_held} option={_option_held} "
+            f"→ note={note_mode} predict={predict_mode}",
+            flush=True,
+        )
+        start_recording()
     elif not is_down and prev_fn_down:
         elapsed = time.time() - _fn_press_time
-        if elapsed >= 0.25 and recording:
+        if elapsed < 0.25:
+            cancel_recording()
+        elif recording:
             threading.Thread(target=stop_and_transcribe, daemon=True).start()
 
     prev_fn_down = is_down
