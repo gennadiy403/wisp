@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans:** 3 plans
 Plans:
 - [x] 01-01-PLAN.md -- Shell injection fix + privacy notice in onboarding
-- [ ] 01-02-PLAN.md -- HUD error infrastructure + API timeout with retry
+- [x] 01-02-PLAN.md -- HUD error infrastructure + API timeout with retry
 - [ ] 01-03-PLAN.md -- CGEventTap health monitoring + microphone error handling
 
 ### Phase 2: Architecture & Reliability
