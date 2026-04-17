@@ -334,6 +334,40 @@ SETUP_STRINGS = {
     },
 }
 
+TOOLTIP_STRINGS = {
+    "en": {
+        "api_timeout": "Transcription timed out. Click to retry.",
+        "api_network": "Connection failed. Click to retry.",
+        "api_server": "Server error. Click to retry.",
+        "retry_attempt": "Retrying... (attempt {n}/3)",
+        "retry_exhausted": "Transcription failed. Try recording again.",
+        "no_mic": "No microphone found.",
+        "mic_denied": "Microphone access denied.",
+        "accessibility_revoked": "Accessibility revoked \u2014 hotkeys disabled.",
+    },
+    "ru": {
+        "api_timeout": "Транскрипция не ответила. Нажми для повтора.",
+        "api_network": "Нет соединения. Нажми для повтора.",
+        "api_server": "Ошибка сервера. Нажми для повтора.",
+        "retry_attempt": "Повтор... (попытка {n}/3)",
+        "retry_exhausted": "Не удалось распознать. Попробуй записать ещё раз.",
+        "no_mic": "Микрофон не найден.",
+        "mic_denied": "Доступ к микрофону запрещён.",
+        "accessibility_revoked": "Доступ отозван \u2014 горячие клавиши отключены.",
+    },
+}
+
+
+def _tooltip(key, **kwargs):
+    """Get localized tooltip text by key."""
+    lang = CONFIG.get("language", "en")
+    if lang not in TOOLTIP_STRINGS:
+        lang = "en"
+    text = TOOLTIP_STRINGS[lang].get(key, key)
+    if kwargs:
+        text = text.format(**kwargs)
+    return text
+
 
 def _ask(prompt, default=""):
     """Prompt user for input."""
@@ -637,6 +671,10 @@ auto_send    = False
 cancelled    = False
 predict_mode = False
 note_mode    = False
+_retry_buffer = None      # audio chunks saved for retry
+_retry_count = 0          # current retry attempt count
+_hud_error_mode = None    # current error mode: "error_retryable", "error_fatal", or None
+_hud_click_handler = None # HUDClickHandler instance
 
 if "_NOTES_CLI_ARGS" not in globals() and "_NOTE_CLI_TEXT" not in globals():
     print("Govori ready.", flush=True)
@@ -707,9 +745,123 @@ def setup_hud():
     hud_window = win
     hud_label  = label
 
+    _setup_tooltip()
+    _setup_hud_click()
 
-def set_hud(visible, mode="recording"):
+
+# ── Tooltip companion panel ──────────────────────────────────────────────────
+_tooltip_panel = None
+_tooltip_label = None
+
+
+def _setup_tooltip():
+    """Create tooltip companion NSPanel positioned next to HUD."""
+    global _tooltip_panel, _tooltip_label
+    style = AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel
+    panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+        AppKit.NSMakeRect(42, 0, 240, 24), style,
+        AppKit.NSBackingStoreBuffered, False,
+    )
+    panel.setLevel_(AppKit.NSFloatingWindowLevel + 1)
+    panel.setOpaque_(False)
+    panel.setBackgroundColor_(
+        AppKit.NSColor.colorWithRed_green_blue_alpha_(0.15, 0.15, 0.15, 0.92)
+    )
+    panel.contentView().setWantsLayer_(True)
+    panel.contentView().layer().setCornerRadius_(6)
+    panel.setIgnoresMouseEvents_(True)
+    panel.setCollectionBehavior_(
+        AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+        | AppKit.NSWindowCollectionBehaviorStationary
+        | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
+    )
+    label = AppKit.NSTextField.labelWithString_("")
+    label.setFont_(AppKit.NSFont.systemFontOfSize_(11))
+    label.setTextColor_(AppKit.NSColor.colorWithRed_green_blue_alpha_(0.95, 0.95, 0.95, 1.0))
+    label.setPreferredMaxLayoutWidth_(224)  # 240 - 2*8 padding
+    label.setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
+    label.setFrame_(AppKit.NSMakeRect(8, 4, 224, 16))
+    panel.contentView().addSubview_(label)
+    panel.orderOut_(None)
+    _tooltip_panel = panel
+    _tooltip_label = label
+
+
+def _show_tooltip(text):
+    """Show tooltip panel with text. Must be called on main queue."""
+    if _tooltip_panel is None:
+        return
+    _tooltip_label.setStringValue_(text)
+    _tooltip_label.sizeToFit()
+    h = max(24, int(_tooltip_label.frame().size.height) + 16)
+    _tooltip_panel.setFrame_display_(AppKit.NSMakeRect(42, 0, 240, h), True)
+    _tooltip_panel.orderFrontRegardless()
+
+
+def _hide_tooltip():
+    """Hide tooltip panel. Must be called on main queue."""
+    if _tooltip_panel is not None:
+        _tooltip_panel.orderOut_(None)
+
+
+# ── HUD click handler ────────────────────────────────────────────────────────
+class HUDClickHandler(AppKit.NSObject):
+    def handleClick_(self, sender):
+        global _retry_count
+        if _hud_error_mode != "error_retryable":
+            return
+        if _retry_buffer is None:
+            return
+        _retry_count += 1
+        if _retry_count > 3:
+            # Max retries exhausted per UI-SPEC
+            set_hud(True, mode="error_fatal", tooltip=_tooltip("retry_exhausted"))
+            return
+        set_hud(True, mode="transcribing", tooltip=_tooltip("retry_attempt", n=_retry_count))
+        threading.Thread(target=_retry_transcription, daemon=True).start()
+
+
+def _retry_transcription():
+    """Re-transcribe using _retry_buffer. Called from HUDClickHandler in daemon thread."""
+    global _retry_buffer, _retry_count
+    buf_copy = _retry_buffer  # local ref -- safe from race
+    if buf_copy is None:
+        return
+    # Replicate the encoding step from stop_and_transcribe
+    audio = np.concatenate(buf_copy, axis=0).flatten()
+    text = _encode_and_transcribe(audio)
+    if text is None:
+        # Still failing -- show retryable error again
+        set_hud(True, mode="error_retryable", tooltip=_tooltip("api_timeout"))
+        return
+    if not text or text in WHISPER_HALLUCINATIONS or _is_hallucination(text):
+        print("(empty)", flush=True)
+        set_hud(False)
+        return
+    _retry_count = 0
+    _retry_buffer = None
+    # Paste the result (same as normal dictation path)
+    paste_text(text + " ")
+    set_hud(False)
+
+
+def _setup_hud_click():
+    """Wire click gesture recognizer to HUD window."""
+    global _hud_click_handler
+    _hud_click_handler = HUDClickHandler.alloc().init()
+    recognizer = AppKit.NSClickGestureRecognizer.alloc().initWithTarget_action_(
+        _hud_click_handler, "handleClick:"
+    )
+    hud_window.contentView().addGestureRecognizer_(recognizer)
+
+
+def set_hud(visible, mode="recording", tooltip=None):
+    global _hud_error_mode
+
     def _update():
+        global _hud_error_mode
+        is_error = mode in ("error_retryable", "error_fatal")
+
         if mode == "recording":
             hud_label.setStringValue_("●")
             hud_label.setTextColor_(
@@ -740,12 +892,64 @@ def set_hud(visible, mode="recording"):
             hud_label.setTextColor_(
                 AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 0.3, 0.3, 1.0)
             )
+        elif mode == "error_retryable":
+            hud_label.setStringValue_("\u21bb")
+            hud_label.setTextColor_(
+                AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 0.85, 0.3, 1.0)
+            )
+            # Slow pulse: opacity 1.0->0.6, duration 1.2s
+            hud_label.setWantsLayer_(True)
+            pulse = Quartz.CABasicAnimation.animationWithKeyPath_("opacity")
+            pulse.setFromValue_(1.0)
+            pulse.setToValue_(0.6)
+            pulse.setDuration_(1.2)
+            pulse.setAutoreverses_(True)
+            pulse.setRepeatCount_(float('inf'))
+            pulse.setTimingFunction_(
+                Quartz.CAMediaTimingFunction.functionWithName_(
+                    Quartz.kCAMediaTimingFunctionEaseInEaseOut
+                )
+            )
+            hud_label.layer().addAnimation_forKey_(pulse, "pulse")
+            _hud_error_mode = "error_retryable"
+        elif mode == "error_fatal":
+            hud_label.setStringValue_("\u2717")
+            hud_label.setTextColor_(
+                AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 0.3, 0.3, 1.0)
+            )
+            # Static -- remove any existing animation
+            hud_label.setWantsLayer_(True)
+            hud_label.layer().removeAnimationForKey_("pulse")
+            _hud_error_mode = "error_fatal"
+
+        # Mouse events: clickable for error modes, ignored for all others
+        if is_error:
+            hud_window.setIgnoresMouseEvents_(False)
+        else:
+            hud_window.setIgnoresMouseEvents_(True)
+            _hide_tooltip()
+            _hud_error_mode = None
+            # Remove error pulse animation when leaving error mode
+            hud_label.setWantsLayer_(True)
+            hud_label.layer().removeAnimationForKey_("pulse")
+
         if visible:
             hud_window.setFrameOrigin_(AppKit.NSMakePoint(6, 0))
             hud_window.orderFrontRegardless()
         else:
             hud_window.orderOut_(None)
+
     AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_update)
+
+    # Tooltip display with delay (in background thread to avoid blocking main queue)
+    if tooltip and mode in ("error_retryable", "error_fatal"):
+        delay = 1.5 if mode == "error_retryable" else 0.5
+        def _show_delayed():
+            time.sleep(delay)
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                lambda: _show_tooltip(tooltip)
+            )
+        threading.Thread(target=_show_delayed, daemon=True).start()
 
 # ── Audio ─────────────────────────────────────────────────────────────────────
 def audio_callback(indata, frames, time_info, status):
