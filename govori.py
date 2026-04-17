@@ -979,10 +979,22 @@ def start_recording():
         cancelled    = False
         _retry_count = 0
         audio_chunks = []
-        audio_stream = sd.InputStream(
-            samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=audio_callback,
-        )
-        audio_stream.start()
+        try:
+            audio_stream = sd.InputStream(
+                samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=audio_callback,
+            )
+            audio_stream.start()
+        except sd.PortAudioError as e:
+            recording = False
+            audio_stream = None
+            err_str = str(e).lower()
+            if "permission" in err_str or "denied" in err_str:
+                tooltip_key = "mic_denied"
+            else:
+                tooltip_key = "no_mic"
+            set_hud(True, mode="error_fatal", tooltip=_tooltip(tooltip_key))
+            print(f"! Mic error: {e}", flush=True)
+            return
     if note_mode:
         hud_mode = "note"
         icon = "✎"
@@ -2200,6 +2212,12 @@ if __name__ == "__main__":
     setup_predict()
     tap = install_monitor()
     threading.Thread(target=_tap_health_check, args=(tap,), daemon=True).start()
+
+    # Microphone startup check (non-blocking per D-12, D-13)
+    try:
+        sd.query_devices(kind='input')
+    except sd.PortAudioError:
+        print("! No microphone detected. Plug one in before recording.", flush=True)
 
     signal.signal(signal.SIGINT, lambda *_: os._exit(0))
     run_loop = AppKit.NSRunLoop.mainRunLoop()
