@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 import av
 import sounddevice as sd
+import openai
 from openai import OpenAI
 
 try:
@@ -642,7 +643,11 @@ if not _api_key:
     print(f"{_api_key_env} not set — check ~/.config/govori/env", flush=True)
     sys.exit(1)
 _base_url = CONFIG.get("base_url")
-client = OpenAI(api_key=_api_key, base_url=_base_url) if _base_url else OpenAI(api_key=_api_key)
+client = (
+    OpenAI(api_key=_api_key, base_url=_base_url, timeout=30.0, max_retries=0)
+    if _base_url
+    else OpenAI(api_key=_api_key, timeout=30.0, max_retries=0)
+)
 
 # Anthropic client — lazy, only if note mode is used
 _anthropic_client = None
@@ -958,7 +963,7 @@ def audio_callback(indata, frames, time_info, status):
 
 
 def start_recording():
-    global recording, audio_chunks, audio_stream, auto_send, cancelled
+    global recording, audio_chunks, audio_stream, auto_send, cancelled, _retry_count
     with _state_lock:
         if recording:
             return
@@ -972,6 +977,7 @@ def start_recording():
         recording    = True
         auto_send    = False
         cancelled    = False
+        _retry_count = 0
         audio_chunks = []
         audio_stream = sd.InputStream(
             samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=audio_callback,
@@ -1019,8 +1025,17 @@ def _encode_and_transcribe(audio):
             prompt=WHISPER_PROMPT,
         )
         return result.text.strip()
-    except Exception as e:
-        print(f"API error: {e}", flush=True)
+    except openai.APITimeoutError:
+        print("! Transcription timed out", flush=True)
+        return None
+    except openai.APIConnectionError as e:
+        print(f"! Connection error: {e}", flush=True)
+        return None
+    except openai.APIStatusError as e:
+        if e.status_code >= 500:
+            print(f"! Server error ({e.status_code})", flush=True)
+        else:
+            print(f"! API error ({e.status_code}): {e}", flush=True)
         return None
 
 
@@ -1034,8 +1049,13 @@ def _is_hallucination(text):
 
 def _note_pipeline_background(audio, duration_sec):
     """Full note pipeline: transcribe → filter → classify → save. No HUD updates."""
+    global _retry_buffer, _retry_count
     text = _encode_and_transcribe(audio)
     if text is None:
+        with _state_lock:
+            _retry_buffer = [audio]  # already concatenated, wrap in list for retry compat
+            _retry_count = 0
+        set_hud(True, mode="error_retryable", tooltip=_tooltip("api_timeout"))
         return
     if _is_hallucination(text):
         print(f"(hallucination filtered: {text})", flush=True)
@@ -1103,9 +1123,21 @@ def stop_and_transcribe():
 
     text = _encode_and_transcribe(audio)
     transcribing = False
+
+    if text is None:
+        if not cancelled:
+            global _retry_buffer, _retry_count
+            with _state_lock:
+                _retry_buffer = list(audio_chunks)  # copy for retry safety (Pitfall 4)
+                _retry_count = 0
+            set_hud(True, mode="error_retryable", tooltip=_tooltip("api_timeout"))
+        else:
+            set_hud(False)
+        return
+
     set_hud(False)
 
-    if text is None or cancelled:
+    if cancelled:
         return
 
     if _is_hallucination(text):
