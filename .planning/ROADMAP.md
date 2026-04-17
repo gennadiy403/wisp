@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 Plans:
 - [x] 01-01-PLAN.md -- Shell injection fix + privacy notice in onboarding
 - [x] 01-02-PLAN.md -- HUD error infrastructure + API timeout with retry
-- [ ] 01-03-PLAN.md -- CGEventTap health monitoring + microphone error handling
+- [x] 01-03-PLAN.md -- CGEventTap health monitoring + microphone error handling
 
 ### Phase 2: Architecture & Reliability
 **Goal**: Govori runs as a proper Python package with isolated modules, explicit state, structured logging, and clean shutdown
