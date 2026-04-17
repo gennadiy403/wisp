@@ -28,7 +28,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. If OpenAI API hangs, transcription times out after 30s with visible feedback to the user
   4. During onboarding, user sees a clear privacy notice stating voice goes to OpenAI and notes go to Anthropic
   5. If no microphone is available or permission is denied, user sees an error message instead of a crash
-**Plans**: TBD
+**Plans:** 3 plans
+Plans:
+- [ ] 01-01-PLAN.md -- Shell injection fix + privacy notice in onboarding
+- [ ] 01-02-PLAN.md -- HUD error infrastructure + API timeout with retry
+- [ ] 01-03-PLAN.md -- CGEventTap health monitoring + microphone error handling
 
 ### Phase 2: Architecture & Reliability
 **Goal**: Govori runs as a proper Python package with isolated modules, explicit state, structured logging, and clean shutdown
@@ -61,6 +65,6 @@ Phases execute in numeric order: 1 -> 2 -> 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Security & Safety | 0/TBD | Not started | - |
+| 1. Security & Safety | 0/3 | Planned | - |
 | 2. Architecture & Reliability | 0/TBD | Not started | - |
 | 3. Packaging & Distribution | 0/TBD | Not started | - |
