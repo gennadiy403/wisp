@@ -19,6 +19,7 @@ import time
 import threading
 import datetime
 import re
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -1820,7 +1821,7 @@ def cli_notes(args):
         return
     if choice == "o":
         editor = os.environ.get("EDITOR", "nano")
-        os.system(f"{editor} {path}")
+        subprocess.run([editor, str(path)])
         return
     if choice != "r":
         return
