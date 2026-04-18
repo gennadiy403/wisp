@@ -80,6 +80,7 @@ def load_config():
         "whisper_prompt": "",
         "base_url": None,
         "api_key_env": "OPENAI_API_KEY",
+        "predict_model": "llama-3.3-70b-versatile",
     }
     cfg = _load_yaml(CONFIG_FILE)
     defaults.update(cfg)
@@ -430,7 +431,15 @@ def cli_setup(force=False):
     # Step 2: Privacy notice
     print(s["step_privacy"])
 
-    # Step 3: Accessibility
+    # Step 3: Accessibility — trigger system prompt
+    import ctypes, objc
+    from Foundation import NSDictionary
+    _hi = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices')
+    _hi.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+    _hi.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+    _hi.AXIsProcessTrustedWithOptions(
+        objc.pyobjc_id(NSDictionary.dictionaryWithObject_forKey_(True, 'AXTrustedCheckOptionPrompt'))
+    )
     print(s["step_access"])
     _ask(s["ask_access_done"])
 
@@ -1004,7 +1013,11 @@ def start_recording():
     else:
         hud_mode = "recording"
         icon = "●"
-    set_hud(True, hud_mode)
+    def _delayed_hud():
+        time.sleep(0.2)
+        if recording and not cancelled:
+            set_hud(True, hud_mode)
+    threading.Thread(target=_delayed_hud, daemon=True).start()
     print(f"{icon} Recording…", flush=True)
 
 
@@ -1170,7 +1183,7 @@ def stop_and_transcribe():
         print("(empty)", flush=True)
 
 
-def cancel_recording():
+def cancel_recording(skip_hud=False):
     global recording, transcribing, audio_stream, audio_chunks, cancelled, predict_mode, note_mode
     with _state_lock:
         cancelled    = True
@@ -1183,7 +1196,8 @@ def cancel_recording():
             audio_stream.close()
             audio_stream = None
         audio_chunks = []
-    set_hud(False)
+    if not skip_hud:
+        set_hud(False)
     print("(cancelled)", flush=True)
 
 # ── Paste / Enter ─────────────────────────────────────────────────────────────
@@ -1619,7 +1633,7 @@ def generate_continuations(text):
     """GPT-4o-mini generates 3 text continuations."""
     try:
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=CONFIG.get("predict_model", "llama-3.3-70b-versatile"),
             messages=[
                 {
                     "role": "system",
@@ -1703,14 +1717,16 @@ _fn_press_time = 0
 
 _shift_held  = False
 _option_held = False
+_start_pending = False
 
 
 def cg_event_callback(proxy, event_type, event, refcon):
-    global prev_fn_down, _fn_press_time, _shift_held, _option_held, note_mode, predict_mode
+    global prev_fn_down, _fn_press_time, _shift_held, _option_held, note_mode, predict_mode, _start_pending
     keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
     flags_now = Quartz.CGEventGetFlags(event)
 
     prev_shift_held = _shift_held
+    prev_option_held = _option_held
     _shift_held  = bool(flags_now & Quartz.kCGEventFlagMaskShift)
     _option_held = bool(flags_now & Quartz.kCGEventFlagMaskAlternate)
 
@@ -1718,10 +1734,18 @@ def cg_event_callback(proxy, event_type, event, refcon):
     if recording and _shift_held and not prev_shift_held:
         if NOTES_CFG:
             note_mode = not note_mode
+            predict_mode = False
             set_hud(True, "note" if note_mode else "recording")
             print(f"[toggle] note_mode={'on' if note_mode else 'off'}", flush=True)
         else:
             print("notes plugin not installed — shift+fn disabled", flush=True)
+
+    # Option TAP during recording → toggle predict mode
+    if recording and _option_held and not prev_option_held:
+        predict_mode = not predict_mode
+        note_mode = False
+        set_hud(True, "predict" if predict_mode else "recording")
+        print(f"[toggle] predict_mode={'on' if predict_mode else 'off'}", flush=True)
 
     # Esc → cancel
     if event_type == Quartz.kCGEventKeyDown and keycode == 53 and (recording or transcribing):
@@ -1753,26 +1777,33 @@ def cg_event_callback(proxy, event_type, event, refcon):
 
     if is_down and not prev_fn_down:
         _fn_press_time = time.time()
-        if _shift_held and NOTES_CFG:
-            note_mode    = True
-            predict_mode = False
-        elif _option_held:
-            predict_mode = True
-            note_mode    = False
-        else:
-            predict_mode = False
-            note_mode    = False
-        print(
-            f"[mode] shift={_shift_held} option={_option_held} "
-            f"→ note={note_mode} predict={predict_mode}",
-            flush=True,
-        )
-        start_recording()
+        _start_pending = True
+        def delayed_start():
+            global _start_pending, predict_mode, note_mode
+            time.sleep(0.20)
+            if not prev_fn_down or not _start_pending:
+                _start_pending = False
+                return
+            _start_pending = False
+            if _shift_held and NOTES_CFG:
+                note_mode    = True
+                predict_mode = False
+            elif _option_held:
+                predict_mode = True
+                note_mode    = False
+            else:
+                predict_mode = False
+                note_mode    = False
+            print(
+                f"[mode] shift={_shift_held} option={_option_held} "
+                f"→ note={note_mode} predict={predict_mode}",
+                flush=True,
+            )
+            start_recording()
+        threading.Thread(target=delayed_start, daemon=True).start()
     elif not is_down and prev_fn_down:
-        elapsed = time.time() - _fn_press_time
-        if elapsed < 0.25:
-            cancel_recording()
-        elif recording:
+        _start_pending = False
+        if recording:
             threading.Thread(target=stop_and_transcribe, daemon=True).start()
 
     prev_fn_down = is_down
@@ -2183,6 +2214,74 @@ def cli_notes(args):
     print(f"✓ Saved: {path}")
 
 
+# ── Singleton enforcement ────────────────────────────────────────────────────
+def _find_other_govori_pids():
+    """Return PIDs of other running govori daemons (excluding self)."""
+    my_pid = os.getpid()
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-f", "govori.py"], text=True
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+    pids = []
+    for line in out.strip().splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid == my_pid:
+            continue
+        pids.append(pid)
+    return pids
+
+
+def _ensure_singleton():
+    """If another govori daemon is running, offer to kill it and take over."""
+    pids = _find_other_govori_pids()
+    if not pids:
+        return
+    pid_list = ", ".join(str(p) for p in pids)
+    print(f"! Govori is already running (PID {pid_list}).", flush=True)
+    if not sys.stdin.isatty():
+        print("  Another instance is active — refusing to start.", flush=True)
+        sys.exit(1)
+    try:
+        ans = input("  Kill it and take over? [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        sys.exit(1)
+    if ans in ("n", "no", "н", "нет"):
+        print("  Aborted.", flush=True)
+        sys.exit(1)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except PermissionError as e:
+            print(f"  Cannot stop PID {pid}: {e}", flush=True)
+            sys.exit(1)
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        if not _find_other_govori_pids():
+            break
+        time.sleep(0.1)
+    remaining = _find_other_govori_pids()
+    if remaining:
+        for pid in remaining:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                continue
+        time.sleep(0.3)
+        remaining = _find_other_govori_pids()
+    if remaining:
+        print(f"  Failed to stop PID(s) {remaining}. Aborting.", flush=True)
+        sys.exit(1)
+    print("  Replaced previous instance.", flush=True)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     if "_NOTES_CLI_ARGS" in globals():
@@ -2199,6 +2298,7 @@ if __name__ == "__main__":
         print(f"→ {text[:120]}{'…' if len(text) > 120 else ''}", flush=True)
         save_or_merge_note(text, duration_sec=0)
         sys.exit(0)
+    _ensure_singleton()
     print(f"Govori started. Model: {MODEL}. Hold fn to record.", flush=True)
 
     app = AppKit.NSApplication.sharedApplication()
