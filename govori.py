@@ -653,9 +653,9 @@ if not _api_key:
     sys.exit(1)
 _base_url = CONFIG.get("base_url")
 client = (
-    OpenAI(api_key=_api_key, base_url=_base_url, timeout=30.0, max_retries=0)
+    OpenAI(api_key=_api_key, base_url=_base_url, timeout=5.0, max_retries=0)
     if _base_url
-    else OpenAI(api_key=_api_key, timeout=30.0, max_retries=0)
+    else OpenAI(api_key=_api_key, timeout=5.0, max_retries=0)
 )
 
 # Anthropic client — lazy, only if note mode is used
@@ -688,7 +688,6 @@ note_mode    = False
 _retry_buffer = None      # audio chunks saved for retry
 _retry_count = 0          # current retry attempt count
 _hud_error_mode = None    # current error mode: "error_retryable", "error_fatal", or None
-_hud_click_handler = None # HUDClickHandler instance
 
 if "_NOTES_CLI_ARGS" not in globals() and "_NOTE_CLI_TEXT" not in globals():
     print("Govori ready.", flush=True)
@@ -760,7 +759,6 @@ def setup_hud():
     hud_label  = label
 
     _setup_tooltip()
-    _setup_hud_click()
 
 
 # ── Tooltip companion panel ──────────────────────────────────────────────────
@@ -818,25 +816,66 @@ def _hide_tooltip():
         _tooltip_panel.orderOut_(None)
 
 
-# ── HUD click handler ────────────────────────────────────────────────────────
-class HUDClickHandler(AppKit.NSObject):
-    def handleClick_(self, sender):
-        global _retry_count
-        if _hud_error_mode != "error_retryable":
-            return
-        if _retry_buffer is None:
-            return
-        _retry_count += 1
-        if _retry_count > 3:
-            # Max retries exhausted per UI-SPEC
-            set_hud(True, mode="error_fatal", tooltip=_tooltip("retry_exhausted"))
-            return
-        set_hud(True, mode="transcribing", tooltip=_tooltip("retry_attempt", n=_retry_count))
-        threading.Thread(target=_retry_transcription, daemon=True).start()
+# ── HUD click + cursor routing ───────────────────────────────────────────────
+def _hud_click_action():
+    global _retry_count
+    if _hud_error_mode != "error_retryable":
+        return
+    if _retry_buffer is None:
+        return
+    _retry_count += 1
+    if _retry_count > 3:
+        set_hud(True, mode="error_fatal", tooltip=_tooltip("retry_exhausted"))
+        return
+    set_hud(True, mode="transcribing", tooltip=_tooltip("retry_attempt", n=_retry_count))
+    threading.Thread(target=_retry_transcription, daemon=True).start()
+
+
+_hud_cursor_pushed = False
+
+
+def _point_inside_hud(event):
+    """Return True if the CG event location falls inside the HUD panel frame."""
+    if hud_window is None or not hud_window.isVisible():
+        return False
+    loc = Quartz.CGEventGetLocation(event)
+    frame = hud_window.frame()
+    screen_h = AppKit.NSScreen.mainScreen().frame().size.height
+    y_cocoa = screen_h - loc.y  # CG is top-origin, Cocoa is bottom-origin
+    return (
+        frame.origin.x <= loc.x <= frame.origin.x + frame.size.width
+        and frame.origin.y <= y_cocoa <= frame.origin.y + frame.size.height
+    )
+
+
+def _route_mouse_to_hud(event_type, event):
+    """Route clicks and cursor pushes to HUD because its NSPanel can't receive events."""
+    global _hud_cursor_pushed
+    is_error = _hud_error_mode in ("error_retryable", "error_fatal")
+    inside = is_error and _point_inside_hud(event)
+
+    if event_type == Quartz.kCGEventLeftMouseDown:
+        if inside:
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_hud_click_action)
+        return
+
+    # Mouse moved: toggle pointing-hand cursor on enter/exit
+    if inside and not _hud_cursor_pushed:
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+            lambda: AppKit.NSCursor.pointingHandCursor().push()
+        )
+        _hud_cursor_pushed = True
+    elif (not inside) and _hud_cursor_pushed:
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+            lambda: AppKit.NSCursor.pop()
+        )
+        _hud_cursor_pushed = False
+
+
 
 
 def _retry_transcription():
-    """Re-transcribe using _retry_buffer. Called from HUDClickHandler in daemon thread."""
+    """Re-transcribe using _retry_buffer. Runs in daemon thread after user click."""
     global _retry_buffer, _retry_count
     buf_copy = _retry_buffer  # local ref -- safe from race
     if buf_copy is None:
@@ -857,16 +896,6 @@ def _retry_transcription():
     # Paste the result (same as normal dictation path)
     paste_text(text + " ")
     set_hud(False)
-
-
-def _setup_hud_click():
-    """Wire click gesture recognizer to HUD window."""
-    global _hud_click_handler
-    _hud_click_handler = HUDClickHandler.alloc().init()
-    recognizer = AppKit.NSClickGestureRecognizer.alloc().initWithTarget_action_(
-        _hud_click_handler, "handleClick:"
-    )
-    hud_window.contentView().addGestureRecognizer_(recognizer)
 
 
 def set_hud(visible, mode="recording", tooltip=None):
@@ -1722,6 +1751,13 @@ _start_pending = False
 
 def cg_event_callback(proxy, event_type, event, refcon):
     global prev_fn_down, _fn_press_time, _shift_held, _option_held, note_mode, predict_mode, _start_pending
+
+    # Mouse routing: HUD is an NSPanel that can't receive native mouse events;
+    # we dispatch via CGEventTap so click-to-retry and pointer cursor still work.
+    if event_type in (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventMouseMoved):
+        _route_mouse_to_hud(event_type, event)
+        return event
+
     keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
     flags_now = Quartz.CGEventGetFlags(event)
 
@@ -1816,7 +1852,9 @@ def install_monitor():
         Quartz.kCGHeadInsertEventTap,
         Quartz.kCGEventTapOptionListenOnly,
         Quartz.CGEventMaskBit(Quartz.kCGEventFlagsChanged)
-        | Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown),
+        | Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown)
+        | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDown)
+        | Quartz.CGEventMaskBit(Quartz.kCGEventMouseMoved),
         cg_event_callback,
         None,
     )
