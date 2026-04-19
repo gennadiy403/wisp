@@ -5,7 +5,7 @@ milestone_name: milestone
 status: executing
 stopped_at: Phase 1 UI-SPEC approved
 last_updated: "2026-04-17T16:20:11.034Z"
-last_activity: 2026-04-17 -- Phase 01 execution started
+last_activity: 2026-04-19 -- Completed quick task 260420-0ik: speed up cleanup pipeline
 progress:
   total_phases: 3
   completed_phases: 0
@@ -74,6 +74,12 @@ None yet.
 - CGEventTap is the #1 ship-blocker: revoked Accessibility permission can freeze all system input
 - Open question: listenOnly vs defaultTap mode for CGEventTap (affects fn key detection)
 - Open question: macOS version floor (recommend >=13 Ventura)
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260420-0ik | speed up cleanup pipeline: prompt caching, local regex fast-path, raise bypass threshold | 2026-04-19 | 49ce794 | [260420-0ik-speed-up-cleanup-pipeline-prompt-caching](./quick/260420-0ik-speed-up-cleanup-pipeline-prompt-caching/) |
 
 ## Deferred Items
 
