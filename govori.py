@@ -1814,6 +1814,90 @@ PEOPLE:
         return text
 
 
+def segment_by_context(text, contexts):
+    """Разбить текст заметки на секции '## <context>' когда затронуто
+    несколько проектов. Наследует временные/приоритетные маркеры («завтра»,
+    «срочно», «до пятницы») из общего начала ко всем секциям — они относятся
+    ко всем упомянутым проектам пока явно не переопределены.
+
+    Fallback: если contexts пуст или содержит 1 элемент — возвращает текст
+    без изменений. Если Haiku недоступен или ответ невалидный — возвращает
+    оригинал. Никогда не блокирует pipeline.
+    """
+    if not text or len(contexts) < 2:
+        return text
+    if NOTES_CFG is None:
+        return text
+    client = _get_anthropic_client()
+    if client is None:
+        return text
+
+    contexts_desc = NOTES_CFG["contexts_desc"]
+    contexts_list = ", ".join(contexts)
+
+    system = f"""Ты структурируешь многотематическую голосовую заметку.
+
+На входе — один связный текст заметки, в котором пользователь последовательно
+говорит о нескольких проектах. Твоя задача: разбить текст на секции
+по проектам, НЕ теряя информацию.
+
+КОНТЕКСТЫ ПОЛЬЗОВАТЕЛЯ:
+{contexts_desc}
+
+В ЭТОЙ ЗАМЕТКЕ ЗАТРОНУТЫ: {contexts_list}
+
+ПРАВИЛА:
+1. Для каждого контекста из списка создай секцию с заголовком `## <context_key>`
+   (ровно тот ключ что в списке выше — marquiz, persona, skvo и т.д., не русские названия).
+2. В каждую секцию помести фрагмент текста, относящийся к этому контексту.
+3. Секции располагай в том порядке, как контексты упоминались в тексте.
+4. НЕ меняй слова пользователя. НЕ переписывай. НЕ сокращай. НЕ добавляй.
+5. НАСЛЕДОВАНИЕ временных/приоритетных маркеров:
+   - Если в начале заметки есть маркер типа «завтра», «срочно», «до пятницы»,
+     «в первую очередь» и т.п., и он явно относится к нескольким упомянутым
+     проектам — повтори этот маркер в каждой релевантной секции.
+   - Если маркер сказан ЯВНО про один конкретный пункт (например, «...проверить
+     их завтра» — только про документы Наташи) — оставляй его ТОЛЬКО в той секции.
+   - Если не уверен к скольки проектам относится маркер — оставь только там
+     где он изначально был сказан.
+6. Разговорные связки ("А ещё", "И ещё нужно", "Так ещё") оставляй в тех
+   секциях где они изначально были — не теряй интонацию переключения.
+7. Если какой-то контекст из списка фактически не упоминается в тексте —
+   НЕ создавай для него секцию (лучше вернуть меньше секций чем пустые).
+
+Верни ТОЛЬКО текст с секциями, без пояснений, кавычек, markdown-обёрток.
+Не добавляй преамбулу перед первой секцией `##` — заголовок должен быть
+первой строкой."""
+
+    try:
+        resp = client.messages.create(
+            model=NOTES_CFG["classifier_model"],
+            max_tokens=max(800, len(text) * 3),
+            temperature=0,
+            system=system,
+            messages=[{"role": "user", "content": text}],
+        )
+        segmented = resp.content[0].text.strip()
+        if segmented.startswith("```"):
+            segmented = re.sub(r"^```(?:\w+)?\s*", "", segmented)
+            segmented = re.sub(r"\s*```\s*$", "", segmented)
+        # Валидация: должно начинаться с `## `
+        if not segmented.startswith("## "):
+            print(f"  [segment] skipped — no section headers in output", flush=True)
+            return text
+        # Валидация длины: разбивка может немного увеличить (заголовки +
+        # возможное дублирование inheritance markers), но не в разы.
+        if len(segmented) < len(text) * 0.7 or len(segmented) > len(text) * 2.5:
+            print(f"  [segment] skipped — length delta suspicious "
+                  f"(orig {len(text)}, segmented {len(segmented)})", flush=True)
+            return text
+        print(f"  [segment] split into {segmented.count('## ')} section(s)", flush=True)
+        return segmented
+    except Exception as e:
+        print(f"  [segment] failed (non-fatal): {e}", flush=True)
+        return text
+
+
 def classify_note(text):
     """Classify transcribed note via Claude. Returns validated meta dict."""
     if not NOTES_CFG:
@@ -1838,8 +1922,13 @@ User's contexts (use these exact keys):
 {NOTES_CFG['contexts_desc']}
 {stuck_block}
 Given a transcribed note, return STRICT JSON ONLY with these fields:
-- title: 2-5 word slug in latin kebab-case (e.g. "work-deploy-issue")
-- contexts: array — usually ONE element. Multiple only if the note explicitly mixes projects.
+- title: 2-5 word slug in latin kebab-case (e.g. "work-deploy-issue"). When
+  the note spans multiple contexts, pick a title that reflects the PRIMARY
+  (first-mentioned) context, not a generic summary.
+- contexts: array of ALL applicable context keys. Return MULTIPLE entries
+  when the note clearly mentions distinct projects. Better to over-tag
+  than under-tag: if the user talks about 3 projects, return all 3 keys.
+  Order: first-mentioned first (this becomes the "primary" context).
 - type: one of [idea, commitment, observation, todo, decision, question, other]
 - urgency: one of [low, medium, high]
 - tags: 1-4 short lowercase tags (free-form)
@@ -2086,6 +2175,11 @@ def save_or_merge_note(text, duration_sec):
         return
     try:
         meta = classify_note(text)
+        # Multi-context split: if Haiku classifier returned multiple contexts,
+        # ask Haiku to structure the text into '## <context>' sections with
+        # inheritance of temporal markers across sections.
+        if len(meta.get("contexts", [])) > 1:
+            text = segment_by_context(text, meta["contexts"])
         candidates = _find_merge_candidates(meta["contexts"])
         decision = _decide_merge(text, candidates)
         decision = _confirm_merge(decision, text)
