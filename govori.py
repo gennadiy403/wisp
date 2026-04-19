@@ -1563,6 +1563,12 @@ def stop_and_transcribe():
 
     if text:
         print(f"→ {text}", flush=True)
+        # Haiku cleanup in all modes except predict (predict needs raw Whisper
+        # output to generate autocomplete suggestions). Cleanup is synchronous
+        # here to ensure the pasted text is the cleaned version — users expect
+        # a single paste, not raw then cleaned.
+        if not predict_mode:
+            text = clean_transcription(text)
         paste_text(text + " ")
         if predict_mode:
             AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
@@ -1718,8 +1724,18 @@ def clean_transcription(text):
     Strict: only fixes clear misrecognitions (close phonemes, merged service
     words, broken proper names). Does NOT rewrite, summarize, or improve style.
     If Haiku unavailable or response malformed, returns input unchanged.
+
+    Short-utterance bypass: skip cleanup entirely for <3 words (e.g. "да",
+    "ок", "ctrl+c", "следующий") — dictation-style commands where latency
+    matters and there's nothing to clean. Saves a Haiku roundtrip and
+    preserves insta-paste UX for short commands.
     """
     if not text or not text.strip():
+        return text
+    # Bypass for very short utterances — 1-2 words are usually commands,
+    # not content requiring correction. Count runs of non-whitespace.
+    word_count = len(text.split())
+    if word_count < 3:
         return text
     if NOTES_CFG is None:
         return text
