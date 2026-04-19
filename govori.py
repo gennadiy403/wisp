@@ -1438,8 +1438,9 @@ def _save_note_audio_background(audio, duration_sec):
 
         container = av.open(str(out_path), mode="w", format="ogg")
         stream = container.add_stream("libopus", rate=SAMPLE_RATE, layout="mono")
-        # Voice-optimized: 24 kbps is clearly intelligible for speech.
-        stream.bit_rate = 24_000
+        # Voice-optimized: 32 kbps is comfortable for speech recall + spot-check
+        # of whisper errors. At 16kHz mono this is ~4 KB/sec → 14 MB/hour.
+        stream.bit_rate = 32_000
         frame = av.AudioFrame.from_ndarray(audio_int16.reshape(1, -1), format="s16", layout="mono")
         frame.rate = SAMPLE_RATE
         for packet in stream.encode(frame):
@@ -1474,6 +1475,7 @@ def _note_pipeline_background(audio, duration_sec):
         print("(empty)", flush=True)
         return
     print(f"→ {text}", flush=True)
+    text = clean_transcription(text)
     save_or_merge_note(text, duration_sec)
 
 
@@ -1669,6 +1671,115 @@ def _validate_meta(data):
         "tags": tags,
         "related_stuck": related,
     }
+
+
+# ── Post-Whisper cleanup via Haiku ────────────────────────────────────────────
+# Whisper misses on short service words ("у Наташи надо" → "Наташи не"),
+# close-phoneme confusion ("учесть"/"узнать"), and rare proper names. A tiny
+# Haiku pass fixes most of these without rewriting content.
+
+def _load_cleanup_vocabulary():
+    """Read terms.md + people.md. Cached. Returns (terms_csv, people_lines)."""
+    global _cleanup_vocab_cache
+    try:
+        return _cleanup_vocab_cache  # cached
+    except NameError:
+        pass
+
+    vocab_dir = Path.home() / ".config" / "govori"
+    terms, people = [], []
+    for name, bucket in (("terms.md", terms), ("people.md", people)):
+        path = vocab_dir / name
+        if not path.exists():
+            continue
+        in_section = False
+        for line in path.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            if s.startswith("## "):
+                in_section = True
+                continue
+            if s.startswith("#"):
+                continue
+            if not in_section:
+                continue
+            if len(s) > 120:
+                continue
+            bucket.append(s)
+
+    globals()["_cleanup_vocab_cache"] = (", ".join(terms), "\n".join(people))
+    return globals()["_cleanup_vocab_cache"]
+
+
+def clean_transcription(text):
+    """Fix obvious Whisper errors via Haiku. Returns cleaned text (or original on failure).
+
+    Strict: only fixes clear misrecognitions (close phonemes, merged service
+    words, broken proper names). Does NOT rewrite, summarize, or improve style.
+    If Haiku unavailable or response malformed, returns input unchanged.
+    """
+    if not text or not text.strip():
+        return text
+    if NOTES_CFG is None:
+        return text
+    client = _get_anthropic_client()
+    if client is None:
+        return text
+
+    terms_csv, people_block = _load_cleanup_vocabulary()
+
+    system = f"""You fix obvious transcription errors in Russian voice notes.
+
+The input is a Whisper transcription. It may contain:
+- Close-phoneme confusions ("учесть"→"взять", "узнать"→"у знать")
+- Merged/dropped short service words ("у Наташи надо"→"Наташи не")
+- Broken rare proper names or domain terms
+- Missing or wrong punctuation
+
+Your job: return the SAME text with ONLY obvious recognition errors fixed.
+
+STRICT RULES:
+1. Do NOT rewrite, paraphrase, translate, summarize, or improve style
+2. Do NOT add information not present in the input
+3. Do NOT remove informal speech, filler words, or digressions
+4. Fix ONLY what is clearly a Whisper mistake
+5. Preserve the user's voice, tone, grammar, and sentence structure
+6. If the text reads fine as-is, return it UNCHANGED
+
+User's vocabulary (for recognizing domain terms and names):
+TERMS: {terms_csv}
+
+PEOPLE:
+{people_block}
+
+Return ONLY the cleaned text — no explanations, no markdown, no quotes."""
+
+    try:
+        resp = client.messages.create(
+            model=NOTES_CFG["classifier_model"],
+            max_tokens=max(400, len(text) * 2),
+            temperature=0,
+            system=system,
+            messages=[{"role": "user", "content": text}],
+        )
+        cleaned = resp.content[0].text.strip()
+        # Strip wrapping quotes if Haiku added them
+        if cleaned.startswith(('"', "«")) and cleaned.endswith(('"', "»")):
+            cleaned = cleaned[1:-1].strip()
+        # Sanity check: reject if response is drastically different in length
+        # (possible hallucination / summary). Accept up to 2x in either direction.
+        if len(cleaned) < len(text) * 0.5 or len(cleaned) > len(text) * 2:
+            print(f"  [cleanup] skipped — length delta suspicious "
+                  f"(orig {len(text)}, cleaned {len(cleaned)})", flush=True)
+            return text
+        if cleaned != text:
+            print(f"  [cleanup] BEFORE: {text}", flush=True)
+            print(f"  [cleanup] AFTER:  {cleaned}", flush=True)
+        return cleaned
+    except Exception as e:
+        print(f"  [cleanup] failed (non-fatal): {e}", flush=True)
+        return text
 
 
 def classify_note(text):
