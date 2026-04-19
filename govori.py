@@ -116,7 +116,8 @@ def load_plugins():
     return plugins
 
 
-_PROMPT_BUDGET_CHARS = 896   # Groq whisper-large-v3-turbo hard limit
+_PROMPT_BUDGET_BYTES = 896   # Groq whisper-large-v3-turbo hard limit (UTF-8 BYTES, not chars)
+_PROMPT_BUDGET_CHARS = _PROMPT_BUDGET_BYTES   # legacy alias
 
 
 def _tokenize_prompt_terms(text):
@@ -164,14 +165,16 @@ def _notes_corpus_text(plugins):
     return "\n".join(chunks).lower()
 
 
-def build_whisper_prompt(config, plugins, budget_chars=_PROMPT_BUDGET_CHARS):
-    """Assemble a budget-constrained Whisper prompt from config + plugin vocabularies.
+def build_whisper_prompt(config, plugins, budget_bytes=_PROMPT_BUDGET_BYTES):
+    """Assemble a byte-budget-constrained Whisper prompt from config + plugin vocabularies.
 
     Auto-prioritises by term usage frequency in past transcriptions (case-
     insensitive substring count over notes corpus), so frequently-dictated
     terms float to the top and unseen terms get a baseline score of 1 (not
-    dropped on first sight). Greedy-packs into `budget_chars` and prints a
-    summary of kept/dropped terms on startup.
+    dropped on first sight). Greedy-packs into `budget_bytes` of UTF-8 output
+    (Groq whisper-large-v3-turbo enforces a byte limit, not a char limit —
+    each cyrillic character costs 2 bytes, so an all-cyrillic prompt of
+    budget_bytes/2 chars is the practical maximum).
     """
     raw_parts = []
     base_cfg = config.get("whisper_prompt", "").strip()
@@ -200,27 +203,29 @@ def build_whisper_prompt(config, plugins, budget_chars=_PROMPT_BUDGET_CHARS):
     )
 
     kept, dropped = [], []
-    remaining = budget_chars
+    remaining = budget_bytes
     for _, _, term in scored:
-        cost = len(term) + (2 if kept else 0)   # ", " separator
+        # UTF-8 byte cost: cyrillic chars cost 2 bytes each. Groq enforces a byte
+        # limit, not a char limit. `, ` separator is ASCII (2 bytes).
+        cost = len(term.encode("utf-8")) + (2 if kept else 0)
         if cost <= remaining:
             kept.append(term)
             remaining -= cost
         else:
             dropped.append(term)
 
-    used = budget_chars - remaining
+    used = budget_bytes - remaining
     if dropped:
         preview = ", ".join(dropped[:6])
         more = f" +{len(dropped) - 6}" if len(dropped) > 6 else ""
         print(
             f"  whisper_prompt: {len(kept)} kept, {len(dropped)} dropped "
-            f"({used}/{budget_chars} chars) — dropped: {preview}{more}",
+            f"({used}/{budget_bytes} bytes) — dropped: {preview}{more}",
             flush=True,
         )
     else:
         print(
-            f"  whisper_prompt: {len(kept)} terms ({used}/{budget_chars} chars)",
+            f"  whisper_prompt: {len(kept)} terms ({used}/{budget_bytes} bytes)",
             flush=True,
         )
 
@@ -437,9 +442,10 @@ SETUP_STRINGS = {
 TOOLTIP_STRINGS = {
     "en": {
         "api_timeout": "Transcription timed out. Click to retry.",
-        "api_network": "Connection failed. Click to retry.",
+        "api_network": "Connection lost",
         "api_server": "Server error. Click to retry.",
-        "retry_attempt": "Retrying... (attempt {n}/3)",
+        "retry_attempt": "Retrying... (attempt {n}/{total})",
+        "attempt_progress": "No connection {n}/{total}{dots}",
         "retry_exhausted": "Transcription failed. Try recording again.",
         "no_mic": "No microphone found.",
         "mic_denied": "Microphone access denied.",
@@ -447,9 +453,10 @@ TOOLTIP_STRINGS = {
     },
     "ru": {
         "api_timeout": "Транскрипция не ответила. Нажми для повтора.",
-        "api_network": "Нет соединения. Нажми для повтора.",
+        "api_network": "\u041e\u0431\u0440\u044b\u0432 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f",
         "api_server": "Ошибка сервера. Нажми для повтора.",
-        "retry_attempt": "Повтор... (попытка {n}/3)",
+        "retry_attempt": "Повтор... (попытка {n}/{total})",
+        "attempt_progress": "\u041d\u0435\u0442 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f {n}/{total}{dots}",
         "retry_exhausted": "Не удалось распознать. Попробуй записать ещё раз.",
         "no_mic": "Микрофон не найден.",
         "mic_denied": "Доступ к микрофону запрещён.",
@@ -798,11 +805,13 @@ if "_NOTES_CLI_ARGS" not in globals() and "_NOTE_CLI_TEXT" not in globals():
 # ── HUD ───────────────────────────────────────────────────────────────────────
 hud_window = None
 hud_label  = None
+hud_container = None
 
 _HUD_S = 32
 
+
 def setup_hud():
-    global hud_window, hud_label
+    global hud_window, hud_label, hud_container
 
     screen = AppKit.NSScreen.mainScreen().frame()
     # Position: bottom-left corner (aligned with optional Hammerspoon status HUD).
@@ -855,30 +864,31 @@ def setup_hud():
 
     hud_window = win
     hud_label  = label
+    hud_container = container
 
     _setup_tooltip()
+    _setup_countdown()
 
 
-# ── Tooltip companion panel ──────────────────────────────────────────────────
-_tooltip_panel = None
-_tooltip_label = None
+# ── Countdown digit panel (floats above HUD during retry attempts) ───────────
+_countdown_panel = None
+_countdown_label = None
+
+_COUNTDOWN_W = _HUD_S
+_COUNTDOWN_H = 18
 
 
-def _setup_tooltip():
-    """Create tooltip companion NSPanel positioned next to HUD."""
-    global _tooltip_panel, _tooltip_label
+def _setup_countdown():
+    """Small transparent panel that shows a single white digit above the HUD."""
+    global _countdown_panel, _countdown_label
     style = AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel
     panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-        AppKit.NSMakeRect(42, 0, 240, 24), style,
+        AppKit.NSMakeRect(6, _HUD_S + 2, _COUNTDOWN_W, _COUNTDOWN_H), style,
         AppKit.NSBackingStoreBuffered, False,
     )
     panel.setLevel_(AppKit.NSFloatingWindowLevel + 1)
     panel.setOpaque_(False)
-    panel.setBackgroundColor_(
-        AppKit.NSColor.colorWithRed_green_blue_alpha_(0.15, 0.15, 0.15, 0.92)
-    )
-    panel.contentView().setWantsLayer_(True)
-    panel.contentView().layer().setCornerRadius_(6)
+    panel.setBackgroundColor_(AppKit.NSColor.clearColor())
     panel.setIgnoresMouseEvents_(True)
     panel.setCollectionBehavior_(
         AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
@@ -886,25 +896,133 @@ def _setup_tooltip():
         | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
     )
     label = AppKit.NSTextField.labelWithString_("")
-    label.setFont_(AppKit.NSFont.systemFontOfSize_(11))
+    label.setFrame_(AppKit.NSMakeRect(0, 0, _COUNTDOWN_W, _COUNTDOWN_H))
+    label.setFont_(AppKit.NSFont.boldSystemFontOfSize_(13))
+    label.setTextColor_(
+        AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.65)
+    )
+    label.setAlignment_(AppKit.NSTextAlignmentCenter)
+    panel.contentView().addSubview_(label)
+    panel.orderOut_(None)
+    _countdown_panel = panel
+    _countdown_label = label
+
+
+def _show_countdown(count):
+    if _countdown_panel is None:
+        return
+    _countdown_label.setStringValue_(str(count))
+    _countdown_panel.orderFrontRegardless()
+
+
+def _hide_countdown():
+    if _countdown_panel is not None:
+        _countdown_panel.orderOut_(None)
+
+
+# ── Tooltip companion panel ──────────────────────────────────────────────────
+_tooltip_panel = None
+_tooltip_label = None
+
+
+_TOOLTIP_X = 42   # HUD ends at x=38 (6+32) → small gap keeps pill edges readable
+_TOOLTIP_W_MAX = 380   # wrap point for very long messages
+_TOOLTIP_PAD_X = 12
+_TOOLTIP_PAD_Y = 7
+
+# Tooltip background tints tie the plate to the HUD state so the pair reads as
+# one status element (Practical UI: "Use system colours to indicate status").
+_TOOLTIP_BG_BY_STATE = {
+    "error_retryable": (0.30, 0.22, 0.08, 0.70),  # amber, semi-transparent
+    "error_fatal":     (0.32, 0.10, 0.10, 0.72),  # red, semi-transparent
+    "transcribing":    (0.10, 0.10, 0.10, 0.70),  # neutral
+}
+_TOOLTIP_BORDER_BY_STATE = {
+    "error_retryable": (1.0, 0.75, 0.25, 0.35),
+    "error_fatal":     (1.0, 0.35, 0.35, 0.40),
+    "transcribing":    (1.0, 1.0, 1.0, 0.08),
+}
+
+
+def _setup_tooltip():
+    """Create tooltip companion NSPanel positioned next to HUD."""
+    global _tooltip_panel, _tooltip_label
+    style = AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel
+    panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+        AppKit.NSMakeRect(_TOOLTIP_X, 0, _TOOLTIP_W_MAX, _HUD_S), style,
+        AppKit.NSBackingStoreBuffered, False,
+    )
+    panel.setLevel_(AppKit.NSFloatingWindowLevel + 1)
+    panel.setOpaque_(False)
+    # Window background must be clear; all visuals live on the content layer so
+    # the rounded border renders once, not stacked over a rectangular window fill.
+    panel.setBackgroundColor_(AppKit.NSColor.clearColor())
+    panel.setHasShadow_(False)
+    panel.contentView().setWantsLayer_(True)
+    layer = panel.contentView().layer()
+    layer.setCornerRadius_(_HUD_S / 2)  # match HUD roundness → pill shape
+    layer.setMasksToBounds_(True)
+    layer.setBorderWidth_(1.0)
+    layer.setBackgroundColor_(
+        AppKit.NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.10, 0.70).CGColor()
+    )
+    layer.setBorderColor_(
+        AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.12).CGColor()
+    )
+    panel.setIgnoresMouseEvents_(True)
+    panel.setCollectionBehavior_(
+        AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+        | AppKit.NSWindowCollectionBehaviorStationary
+        | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
+    )
+    label = AppKit.NSTextField.labelWithString_("")
+    label.setFont_(AppKit.NSFont.systemFontOfSize_(12))
     label.setTextColor_(AppKit.NSColor.colorWithRed_green_blue_alpha_(0.95, 0.95, 0.95, 1.0))
-    label.setPreferredMaxLayoutWidth_(224)  # 240 - 2*8 padding
+    label.setPreferredMaxLayoutWidth_(_TOOLTIP_W_MAX - 2 * _TOOLTIP_PAD_X)
     label.setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
-    label.setFrame_(AppKit.NSMakeRect(8, 4, 224, 16))
     panel.contentView().addSubview_(label)
     panel.orderOut_(None)
     _tooltip_panel = panel
     _tooltip_label = label
 
 
-def _show_tooltip(text):
-    """Show tooltip panel with text. Must be called on main queue."""
+def _show_tooltip(text, mode="transcribing"):
+    """Show tooltip panel with text. Must be called on main queue.
+
+    Height grows with wrapped content; the panel stays vertically centered on the
+    HUD circle so the two read as one paired status element (Fitts's law).
+    Background tint follows `mode` to tie the plate to the HUD status colour.
+    """
     if _tooltip_panel is None:
         return
+
+    bg = _TOOLTIP_BG_BY_STATE.get(mode, _TOOLTIP_BG_BY_STATE["transcribing"])
+    border = _TOOLTIP_BORDER_BY_STATE.get(mode, _TOOLTIP_BORDER_BY_STATE["transcribing"])
+    layer = _tooltip_panel.contentView().layer()
+    layer.setBackgroundColor_(
+        AppKit.NSColor.colorWithRed_green_blue_alpha_(*bg).CGColor()
+    )
+    layer.setBorderColor_(
+        AppKit.NSColor.colorWithRed_green_blue_alpha_(*border).CGColor()
+    )
+
+    # Measure text size precisely via attributed string — sizeToFit with
+    # preferredMaxLayoutWidth can cache stale values across calls.
+    attrs = {AppKit.NSFontAttributeName: _tooltip_label.font()}
+    measured = AppKit.NSString.stringWithString_(text).sizeWithAttributes_(attrs)
+    text_w = int(measured.width) + 4  # +4 antialiasing slack
+    text_h = int(measured.height) + 2
     _tooltip_label.setStringValue_(text)
-    _tooltip_label.sizeToFit()
-    h = max(24, int(_tooltip_label.frame().size.height) + 16)
-    _tooltip_panel.setFrame_display_(AppKit.NSMakeRect(42, 0, 240, h), True)
+    panel_w = min(_TOOLTIP_W_MAX, text_w + 2 * _TOOLTIP_PAD_X)
+    h = max(_HUD_S, text_h + 2 * _TOOLTIP_PAD_Y)
+    label_y = (h - text_h) // 2
+    _tooltip_label.setFrame_(
+        AppKit.NSMakeRect(_TOOLTIP_PAD_X, label_y, panel_w - 2 * _TOOLTIP_PAD_X, text_h)
+    )
+    panel_y = int(_HUD_S / 2 - h / 2)
+    _tooltip_panel.setFrame_display_(
+        AppKit.NSMakeRect(_TOOLTIP_X, panel_y, panel_w, h), True
+    )
     _tooltip_panel.orderFrontRegardless()
 
 
@@ -925,11 +1043,37 @@ def _hud_click_action():
     if _retry_count > 3:
         set_hud(True, mode="error_fatal", tooltip=_tooltip("retry_exhausted"))
         return
-    set_hud(True, mode="transcribing", tooltip=_tooltip("retry_attempt", n=_retry_count))
+    set_hud(True, mode="transcribing", tooltip=_tooltip("retry_attempt", n=_retry_count, total=3))
     threading.Thread(target=_retry_transcription, daemon=True).start()
 
 
-_hud_cursor_pushed = False
+_hud_pressed = False
+
+
+def _hud_apply_press(pressed):
+    """Visual press feedback: white fill + dark icon while button is held."""
+    if hud_container is None or hud_label is None:
+        return
+    if pressed:
+        hud_container.layer().setBackgroundColor_(
+            AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.95).CGColor()
+        )
+        hud_label.setTextColor_(
+            AppKit.NSColor.colorWithRed_green_blue_alpha_(0.15, 0.15, 0.15, 1.0)
+        )
+    else:
+        hud_container.layer().setBackgroundColor_(
+            AppKit.NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.10, 0.85).CGColor()
+        )
+        # Restore icon color for the current error mode
+        if _hud_error_mode == "error_retryable":
+            hud_label.setTextColor_(
+                AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 0.85, 0.3, 1.0)
+            )
+        elif _hud_error_mode == "error_fatal":
+            hud_label.setTextColor_(
+                AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 0.3, 0.3, 1.0)
+            )
 
 
 def _point_inside_hud(event):
@@ -947,27 +1091,36 @@ def _point_inside_hud(event):
 
 
 def _route_mouse_to_hud(event_type, event):
-    """Route clicks and cursor pushes to HUD because its NSPanel can't receive events."""
-    global _hud_cursor_pushed
+    """Route clicks to the HUD because its non-activating NSPanel can't receive
+    native mouse events. Cursor changes aren't possible for background apps on
+    macOS — press animation carries the interactive affordance instead.
+
+    mouseDown inside → fill HUD white. mouseUp inside → fire retry.
+    mouseUp outside (drag-out) cancels the press silently.
+    """
+    global _hud_pressed
     is_error = _hud_error_mode in ("error_retryable", "error_fatal")
     inside = is_error and _point_inside_hud(event)
 
     if event_type == Quartz.kCGEventLeftMouseDown:
         if inside:
-            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_hud_click_action)
+            _hud_pressed = True
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                lambda: _hud_apply_press(True)
+            )
         return
 
-    # Mouse moved: toggle pointing-hand cursor on enter/exit
-    if inside and not _hud_cursor_pushed:
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
-            lambda: AppKit.NSCursor.pointingHandCursor().push()
-        )
-        _hud_cursor_pushed = True
-    elif (not inside) and _hud_cursor_pushed:
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
-            lambda: AppKit.NSCursor.pop()
-        )
-        _hud_cursor_pushed = False
+    if event_type == Quartz.kCGEventLeftMouseUp:
+        if _hud_pressed:
+            was_pressed = _hud_pressed
+            _hud_pressed = False
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                lambda: _hud_apply_press(False)
+            )
+            # Only fire action if mouse is still over the HUD at release
+            if was_pressed and inside:
+                AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_hud_click_action)
+        return
 
 
 
@@ -980,10 +1133,11 @@ def _retry_transcription():
         return
     # Replicate the encoding step from stop_and_transcribe
     audio = np.concatenate(buf_copy, axis=0).flatten()
-    text = _encode_and_transcribe(audio)
+    duration = len(audio) / SAMPLE_RATE
+    text = _encode_and_transcribe(audio, timeout=_timeout_for_duration(duration))
     if text is None:
         # Still failing -- show retryable error again
-        set_hud(True, mode="error_retryable", tooltip=_tooltip("api_timeout"))
+        set_hud(True, mode="error_retryable", tooltip=_tooltip("api_network"))
         return
     if not text or text in WHISPER_HALLUCINATIONS or _is_hallucination(text):
         print("(empty)", flush=True)
@@ -996,7 +1150,7 @@ def _retry_transcription():
     set_hud(False)
 
 
-def set_hud(visible, mode="recording", tooltip=None):
+def set_hud(visible, mode="recording", tooltip=None, count=None):
     global _hud_error_mode
 
     def _update():
@@ -1013,6 +1167,15 @@ def set_hud(visible, mode="recording", tooltip=None):
             hud_label.setTextColor_(
                 AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 0.85, 0.3, 1.0)
             )
+        elif mode == "countdown":
+            # "Connection broken" glyph: downwards zigzag arrow reads as a severed
+            # signal line. Warm warning orange signals the disconnected state.
+            hud_label.setStringValue_("\u21af")
+            hud_label.setTextColor_(
+                AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 0.55, 0.25, 1.0)
+            )
+            hud_label.setWantsLayer_(True)
+            hud_label.layer().removeAnimationForKey_("pulse")
         elif mode == "predict":
             hud_label.setStringValue_("✦")
             hud_label.setTextColor_(
@@ -1068,29 +1231,31 @@ def set_hud(visible, mode="recording", tooltip=None):
             hud_window.setIgnoresMouseEvents_(False)
         else:
             hud_window.setIgnoresMouseEvents_(True)
-            _hide_tooltip()
+            if not tooltip:
+                _hide_tooltip()
             _hud_error_mode = None
             # Remove error pulse animation when leaving error mode
             hud_label.setWantsLayer_(True)
             hud_label.layer().removeAnimationForKey_("pulse")
+
+        # Countdown digit panel visibility follows mode
+        if mode == "countdown" and count is not None:
+            _show_countdown(count)
+        else:
+            _hide_countdown()
 
         if visible:
             hud_window.setFrameOrigin_(AppKit.NSMakePoint(6, 0))
             hud_window.orderFrontRegardless()
         else:
             hud_window.orderOut_(None)
+            _hide_countdown()
 
     AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_update)
 
-    # Tooltip display with delay (in background thread to avoid blocking main queue)
-    if tooltip and mode in ("error_retryable", "error_fatal"):
-        delay = 1.5 if mode == "error_retryable" else 0.5
-        def _show_delayed():
-            time.sleep(delay)
-            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
-                lambda: _show_tooltip(tooltip)
-            )
-        threading.Thread(target=_show_delayed, daemon=True).start()
+    # Tooltip plate intentionally disabled — the HUD icon alone carries state.
+    # The `tooltip` parameter stays accepted so call sites don't need to change.
+    AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_hide_tooltip)
 
 # ── Audio ─────────────────────────────────────────────────────────────────────
 def audio_callback(indata, frames, time_info, status):
@@ -1144,7 +1309,18 @@ def start_recording():
     print(f"{icon} Recording…", flush=True)
 
 
-def _encode_and_transcribe(audio):
+def _timeout_for_duration(duration_sec):
+    """Scale request timeout with audio length — longer audio takes longer to process."""
+    if duration_sec >= 60:
+        return 8.0
+    if duration_sec >= 30:
+        return 7.0
+    if duration_sec >= 20:
+        return 6.0
+    return 5.0
+
+
+def _encode_and_transcribe(audio, timeout=5.0):
     """Encode mono float32 audio → OGG/Opus → Whisper. Returns text or None."""
     peak = np.max(np.abs(audio))
     if peak > 0:
@@ -1165,7 +1341,7 @@ def _encode_and_transcribe(audio):
     buf.seek(0)
 
     try:
-        result = client.audio.transcriptions.create(
+        result = client.with_options(timeout=timeout, max_retries=0).audio.transcriptions.create(
             model=MODEL,
             file=buf,
             language=LANGUAGE,
@@ -1174,7 +1350,7 @@ def _encode_and_transcribe(audio):
         )
         return result.text.strip()
     except openai.APITimeoutError:
-        print("! Transcription timed out", flush=True)
+        print(f"! Transcription timed out ({timeout}s)", flush=True)
         return None
     except openai.APIConnectionError as e:
         print(f"! Connection error: {e}", flush=True)
@@ -1187,6 +1363,48 @@ def _encode_and_transcribe(audio):
         return None
 
 
+def _transcribe_with_auto_retries(audio, duration_sec, on_progress=None, max_retries=2):
+    """One initial attempt + up to max_retries auto-retries. Returns text or None.
+
+    on_progress(attempt, total_attempts, total_sec_left) is called every second
+    ONLY during retry attempts (attempt > 1). `total_sec_left` counts down the
+    combined retry budget across all retries (not per-cycle), so the user sees a
+    single steady countdown from `max_retries * timeout` down to 1.
+    """
+    timeout = _timeout_for_duration(duration_sec)
+    total_attempts = max_retries + 1
+    total_retry_secs = max_retries * int(timeout)
+    retry_ticks_elapsed = 0
+
+    for attempt in range(1, total_attempts + 1):
+        result = {"text": None, "done": False}
+
+        def _do():
+            try:
+                result["text"] = _encode_and_transcribe(audio, timeout=timeout)
+            finally:
+                result["done"] = True
+
+        worker = threading.Thread(target=_do, daemon=True)
+        worker.start()
+
+        sec_left_in_attempt = int(timeout)
+        while not result["done"] and sec_left_in_attempt > 0:
+            if on_progress is not None and attempt > 1:
+                total_remaining = total_retry_secs - retry_ticks_elapsed
+                on_progress(attempt, total_attempts, total_remaining)
+                retry_ticks_elapsed += 1
+            time.sleep(1)
+            sec_left_in_attempt -= 1
+
+        worker.join(timeout=timeout + 2)
+
+        if result["text"] is not None:
+            return result["text"]
+
+    return None
+
+
 def _is_hallucination(text):
     text_check = text.lower().strip().rstrip(".!?,;:…").strip()
     return (
@@ -1195,15 +1413,59 @@ def _is_hallucination(text):
     )
 
 
+def _save_note_audio_background(audio, duration_sec):
+    """Persist recorded audio as compressed Opus for later recall/verification.
+
+    Writes to ~/life/state/govori-audio/YYYY-MM-DD/HHMMSS_Nsec.opus.
+    Silently no-op on any error — audio persistence is best-effort and must not
+    affect note-save success.
+
+    Sizing: libopus @ 24kbps voice ≈ 3 KB/sec. A 10s note → ~30 KB. Month of
+    heavy use → <30 MB. Retention is the user's problem (no auto-cleanup yet).
+    """
+    try:
+        import datetime as _dt
+        now = _dt.datetime.now()
+        date_dir = Path.home() / "life" / "state" / "govori-audio" / now.strftime("%Y-%m-%d")
+        date_dir.mkdir(parents=True, exist_ok=True)
+        stem = now.strftime("%H%M%S") + f"_{int(round(duration_sec))}s"
+        out_path = date_dir / f"{stem}.opus"
+
+        # Normalize + encode mirroring _transcribe_http_call's approach.
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        audio_n = (audio / peak * 0.9) if peak > 0 else audio
+        audio_int16 = (audio_n * 32767).astype(np.int16)
+
+        container = av.open(str(out_path), mode="w", format="ogg")
+        stream = container.add_stream("libopus", rate=SAMPLE_RATE, layout="mono")
+        # Voice-optimized: 24 kbps is clearly intelligible for speech.
+        stream.bit_rate = 24_000
+        frame = av.AudioFrame.from_ndarray(audio_int16.reshape(1, -1), format="s16", layout="mono")
+        frame.rate = SAMPLE_RATE
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+        container.close()
+        size_kb = out_path.stat().st_size / 1024
+        print(f"✓ audio saved: {out_path.name} ({size_kb:.1f} KB)", flush=True)
+    except Exception as e:
+        print(f"! audio-save failed (non-fatal): {e}", flush=True)
+
+
 def _note_pipeline_background(audio, duration_sec):
     """Full note pipeline: transcribe → filter → classify → save. No HUD updates."""
     global _retry_buffer, _retry_count
-    text = _encode_and_transcribe(audio)
+    threading.Thread(
+        target=lambda a=audio, d=duration_sec: _save_note_audio_background(a, d),
+        daemon=True,
+    ).start()
+    text = _transcribe_with_auto_retries(audio, duration_sec)
     if text is None:
         with _state_lock:
             _retry_buffer = [audio]  # already concatenated, wrap in list for retry compat
             _retry_count = 0
-        set_hud(True, mode="error_retryable", tooltip=_tooltip("api_timeout"))
+        set_hud(True, mode="error_retryable", tooltip=_tooltip("api_network"))
         return
     if _is_hallucination(text):
         print(f"(hallucination filtered: {text})", flush=True)
@@ -1269,7 +1531,12 @@ def stop_and_transcribe():
     set_hud(True, "transcribing")
     print("■ Transcribing…", flush=True)
 
-    text = _encode_and_transcribe(audio)
+    duration = total_samples / SAMPLE_RATE
+
+    def _show_progress(n, total, sec_left):
+        set_hud(True, mode="countdown", count=sec_left)
+
+    text = _transcribe_with_auto_retries(audio, duration, on_progress=_show_progress)
     transcribing = False
 
     if text is None:
@@ -1278,7 +1545,7 @@ def stop_and_transcribe():
             with _state_lock:
                 _retry_buffer = list(audio_chunks)  # copy for retry safety (Pitfall 4)
                 _retry_count = 0
-            set_hud(True, mode="error_retryable", tooltip=_tooltip("api_timeout"))
+            set_hud(True, mode="error_retryable", tooltip=_tooltip("api_network"))
         else:
             set_hud(False)
         return
@@ -1848,7 +2115,7 @@ def cg_event_callback(proxy, event_type, event, refcon):
 
     # Mouse routing: HUD is an NSPanel that can't receive native mouse events;
     # we dispatch via CGEventTap so click-to-retry and pointer cursor still work.
-    if event_type in (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventMouseMoved):
+    if event_type in (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp):
         _route_mouse_to_hud(event_type, event)
         return event
 
@@ -1948,7 +2215,7 @@ def install_monitor():
         Quartz.CGEventMaskBit(Quartz.kCGEventFlagsChanged)
         | Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown)
         | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDown)
-        | Quartz.CGEventMaskBit(Quartz.kCGEventMouseMoved),
+        | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseUp),
         cg_event_callback,
         None,
     )
