@@ -116,17 +116,115 @@ def load_plugins():
     return plugins
 
 
-def build_whisper_prompt(config, plugins):
-    """Merge base whisper_prompt with plugin-level prompts."""
-    parts = []
-    base = config.get("whisper_prompt", "").strip()
-    if base:
-        parts.append(base)
-    for name, plugin in plugins.items():
+_PROMPT_BUDGET_CHARS = 896   # Groq whisper-large-v3-turbo hard limit
+
+
+def _tokenize_prompt_terms(text):
+    """Split a prompt string into individual vocabulary terms.
+
+    For segments containing a colon (e.g. "Проекты: Marquiz, SKVO"), keep only
+    the part after the last colon so category labels are discarded. Long phrases
+    (> 40 chars) are dropped — they're instructional preamble, which Whisper
+    ignores anyway.
+    """
+    terms = []
+    for part in re.split(r'[,.;\n]', text):
+        part = part.strip()
+        if not part:
+            continue
+        if ':' in part:
+            part = part.rsplit(':', 1)[1].strip()
+        if part and len(part) <= 40:
+            terms.append(part)
+    return terms
+
+
+def _notes_corpus_text(plugins):
+    """Lowercased concatenation of all .md notes under plugin output_dirs.
+
+    Used for frequency scoring of prompt terms. Returns "" when no notes exist.
+    """
+    bases = set()
+    for plugin in plugins.values():
+        out = plugin.get("output_dir")
+        if not out:
+            continue
+        base_str = out.split('{', 1)[0].rstrip('/') or out
+        bases.add(Path(base_str).expanduser())
+
+    chunks = []
+    for base in bases:
+        if not base.exists():
+            continue
+        for md in base.rglob("*.md"):
+            try:
+                chunks.append(md.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                continue
+    return "\n".join(chunks).lower()
+
+
+def build_whisper_prompt(config, plugins, budget_chars=_PROMPT_BUDGET_CHARS):
+    """Assemble a budget-constrained Whisper prompt from config + plugin vocabularies.
+
+    Auto-prioritises by term usage frequency in past transcriptions (case-
+    insensitive substring count over notes corpus), so frequently-dictated
+    terms float to the top and unseen terms get a baseline score of 1 (not
+    dropped on first sight). Greedy-packs into `budget_chars` and prints a
+    summary of kept/dropped terms on startup.
+    """
+    raw_parts = []
+    base_cfg = config.get("whisper_prompt", "").strip()
+    if base_cfg:
+        raw_parts.append(base_cfg)
+    for plugin in plugins.values():
         p = plugin.get("whisper_prompt", "").strip()
         if p:
-            parts.append(p)
-    return " ".join(parts)
+            raw_parts.append(p)
+
+    seen = set()
+    terms = []
+    for part in raw_parts:
+        for t in _tokenize_prompt_terms(part):
+            key = t.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            terms.append(t)
+    if not terms:
+        return ""
+
+    corpus = _notes_corpus_text(plugins)
+    scored = sorted(
+        (-max(1, corpus.count(t.lower())), idx, t) for idx, t in enumerate(terms)
+    )
+
+    kept, dropped = [], []
+    remaining = budget_chars
+    for _, _, term in scored:
+        cost = len(term) + (2 if kept else 0)   # ", " separator
+        if cost <= remaining:
+            kept.append(term)
+            remaining -= cost
+        else:
+            dropped.append(term)
+
+    used = budget_chars - remaining
+    if dropped:
+        preview = ", ".join(dropped[:6])
+        more = f" +{len(dropped) - 6}" if len(dropped) > 6 else ""
+        print(
+            f"  whisper_prompt: {len(kept)} kept, {len(dropped)} dropped "
+            f"({used}/{budget_chars} chars) — dropped: {preview}{more}",
+            flush=True,
+        )
+    else:
+        print(
+            f"  whisper_prompt: {len(kept)} terms ({used}/{budget_chars} chars)",
+            flush=True,
+        )
+
+    return ", ".join(kept)
 
 
 def build_notes_config(plugins):
