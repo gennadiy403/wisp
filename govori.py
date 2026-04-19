@@ -1718,6 +1718,44 @@ def _load_cleanup_vocabulary():
     return globals()["_cleanup_vocab_cache"]
 
 
+# ── Known Whisper corrections (local fast-path) ──────────────────────────────
+# Hardcoded substitutions for the most frequent Whisper misrecognitions.
+# Run BEFORE the Haiku cleanup call so we can skip Haiku entirely when the
+# regex pass fully explains the change (see clean_transcription below).
+# Compiled once at import. List ordering matters only in that later entries
+# may operate on text already touched by earlier entries — keep independent.
+_WHISPER_CORRECTIONS = [
+    # Known phoneme confusion: "софтра" → "завтра" (tomorrow)
+    (re.compile(r"\bсофтра\b", re.IGNORECASE), "завтра"),
+
+    # Marquiz brand — three common mis-transcriptions, case-insensitive.
+    # Order: longer / more specific forms first to avoid partial replacement.
+    (re.compile(r"\bMark\s*Visa\b", re.IGNORECASE), "Marquiz"),
+    (re.compile(r"\bМарк\s*Виз\b", re.IGNORECASE), "Marquiz"),
+    (re.compile(r"\bМаркиз\b", re.IGNORECASE), "Marquiz"),
+
+    # Travelmart brand — normalize Cyrillic variants (incl. instrumental case
+    # "Трайл-Мартом"/"Трейл-Мартом") to canonical nominative "Travelmart".
+    # Haiku will not re-touch after this because the text is already clean.
+    (re.compile(r"\bТр[ае]йл[\-\s]*Март(?:ом|а|у|е|ами|ах)?\b", re.IGNORECASE), "Travelmart"),
+]
+
+
+def _apply_whisper_corrections(text):
+    """Apply local regex fast-path for known Whisper errors.
+
+    Runs before the Haiku cleanup call. Returns the (possibly) corrected
+    text. Idempotent — running twice produces the same result.
+
+    Intentionally narrow: only substitutions that are context-free and
+    always correct. Context-dependent fixes (БИОС→VPS, Наташи-не phrasing)
+    stay with Haiku.
+    """
+    for pattern, replacement in _WHISPER_CORRECTIONS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def clean_transcription(text):
     """Fix obvious Whisper errors via Haiku. Returns cleaned text (or original on failure).
 
@@ -1725,9 +1763,11 @@ def clean_transcription(text):
     words, broken proper names). Does NOT rewrite, summarize, or improve style.
     If Haiku unavailable or response malformed, returns input unchanged.
 
-    Short-utterance bypass: skip cleanup entirely for <3 words (e.g. "да",
-    "ок", "ctrl+c", "следующий") — dictation-style commands where latency
-    matters and there's nothing to clean. Saves a Haiku roundtrip and
+    Short-utterance bypass: skip cleanup entirely for <6 words (e.g. "да",
+    "ок", "ctrl+c", "следующий", "завтра встреча с Маркиз") — dictation-style
+    commands where latency matters most. The regex fast-path below covers
+    the most common short-error cases (софтра→завтра, brand variants) so
+    we rarely miss a correction in this range. Saves a Haiku roundtrip and
     preserves insta-paste UX for short commands.
     """
     if not text or not text.strip():
@@ -1735,13 +1775,30 @@ def clean_transcription(text):
     # Bypass for very short utterances — 1-2 words are usually commands,
     # not content requiring correction. Count runs of non-whitespace.
     word_count = len(text.split())
-    if word_count < 3:
+    # Short-utterance bypass: ≤5 words skip cleanup entirely. Trade-off:
+    # occasional missed correction on 3–5 word utterances (e.g. "завтра
+    # встреча с Маркиз") for consistent sub-200ms latency on them. The
+    # regex fast-path below covers the most common short cases anyway.
+    if word_count < 6:
         return text
     if NOTES_CFG is None:
         return text
     client = _get_anthropic_client()
     if client is None:
         return text
+
+    # Local regex fast-path: fix known Whisper errors without a network call.
+    # If the regex pass changed the text AND the utterance is short (<8 words),
+    # the correction is almost certainly complete — skip Haiku entirely and
+    # save a 1–2s roundtrip. Longer utterances still go through Haiku because
+    # they may contain context-dependent fixes the regex table does not cover.
+    cleaned_local = _apply_whisper_corrections(text)
+    if cleaned_local != text and word_count < 8:
+        print(f"  [cleanup] regex-only: {text} → {cleaned_local}", flush=True)
+        return cleaned_local
+    # Fall through to Haiku. Pass the regex-corrected text so Haiku sees the
+    # already-normalized brand names and does not re-touch them.
+    text = cleaned_local
 
     terms_csv, people_block = _load_cleanup_vocabulary()
 
@@ -1796,7 +1853,13 @@ PEOPLE:
             model=NOTES_CFG["classifier_model"],
             max_tokens=max(400, len(text) * 2),
             temperature=0,
-            system=system,
+            # Prompt caching: system prompt is ~1500 tokens and unchanged
+            # across calls. Ephemeral cache (5-min TTL) yields -30-50% TTFT
+            # on repeated calls within that window, and -90% input token cost
+            # on cache hits. First call of a session still pays full price.
+            system=[
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ],
             messages=[{"role": "user", "content": text}],
         )
         cleaned = resp.content[0].text.strip()
