@@ -1042,11 +1042,7 @@ def start_recording():
     else:
         hud_mode = "recording"
         icon = "●"
-    def _delayed_hud():
-        time.sleep(0.2)
-        if recording and not cancelled:
-            set_hud(True, hud_mode)
-    threading.Thread(target=_delayed_hud, daemon=True).start()
+    set_hud(True, hud_mode)
     print(f"{icon} Recording…", flush=True)
 
 
