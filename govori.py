@@ -1729,31 +1729,45 @@ def clean_transcription(text):
 
     terms_csv, people_block = _load_cleanup_vocabulary()
 
-    system = f"""You fix obvious transcription errors in Russian voice notes.
+    system = f"""Ты чистишь русскоязычные голосовые заметки от шумов Whisper и речи.
 
-The input is a Whisper transcription. It may contain:
-- Close-phoneme confusions ("учесть"→"взять", "узнать"→"у знать")
-- Merged/dropped short service words ("у Наташи надо"→"Наташи не")
-- Broken rare proper names or domain terms
-- Missing or wrong punctuation
+На входе — сырая транскрипция голоса. Цель: получить понятный, грамматически
+правильный текст с сохранением ВСЕХ фактов и намерений автора.
 
-Your job: return the SAME text with ONLY obvious recognition errors fixed.
+ИСПРАВЛЯЙ:
+1. Ошибки распознавания Whisper:
+   - Близкие по звучанию слова ("взять"↔"учесть", "BIOS"↔"VPS", "маркиз"↔"Marquiz")
+   - Слипшиеся служебные слова ("у Наташи надо"→ошибочно "Наташи не")
+   - Искажённые имена собственные и доменные термины (см. словарь ниже)
+2. Грамматику и согласования, сломанные Whisper'ом (падежи, виды, род)
+3. Пунктуацию (расставляй точки, запятые, тире, где ясно из смысла)
 
-STRICT RULES:
-1. Do NOT rewrite, paraphrase, translate, summarize, or improve style
-2. Do NOT add information not present in the input
-3. Do NOT remove informal speech, filler words, or digressions
-4. Fix ONLY what is clearly a Whisper mistake
-5. Preserve the user's voice, tone, grammar, and sentence structure
-6. If the text reads fine as-is, return it UNCHANGED
+УБИРАЙ:
+4. Слова-паразиты и филлеры: "эээ", "ну", "вот", "так", "сейчас", "блин", "типа",
+   "короче", "в общем" — когда они не несут смысла.
+5. Запинки и самоперебивания: "еще нужно... еще нужно... еще...", "а еще, а еще" —
+   оставляй только одну финальную формулировку мысли.
+6. Повторы одной и той же мысли другими словами — оставляй самую ясную версию.
+7. Meta-комментарии самому себе: "я хочу сделать заметку", "это заметка про",
+   "сейчас запишу" — это не часть заметки, это навигация. УДАЛЯЙ полностью.
 
-User's vocabulary (for recognizing domain terms and names):
+ЗАПРЕЩЕНО:
+- Переставлять смысловые блоки или менять порядок упомянутых задач/мыслей
+- Добавлять факты, выводы, интерпретации или советы
+- Расшифровывать аббревиатуры (если автор сказал "VPS" — пиши "VPS", не "сервер")
+- Убирать конкретные детали: имена, числа, даты, место, проекты — ВСЁ это остаётся
+- Превращать разговорный тон в формальный — сохраняй голос автора
+- Переводить на английский или другой язык
+
+ЕСЛИ УВЕРЕН В ИСПРАВЛЕНИИ — делай его. ЕСЛИ сомневаешься — оставь как есть.
+
+Словарь автора (для распознавания терминов и имён):
 TERMS: {terms_csv}
 
 PEOPLE:
 {people_block}
 
-Return ONLY the cleaned text — no explanations, no markdown, no quotes."""
+Верни ТОЛЬКО очищенный текст — без объяснений, кавычек, markdown."""
 
     try:
         resp = client.messages.create(
@@ -1767,9 +1781,11 @@ Return ONLY the cleaned text — no explanations, no markdown, no quotes."""
         # Strip wrapping quotes if Haiku added them
         if cleaned.startswith(('"', "«")) and cleaned.endswith(('"', "»")):
             cleaned = cleaned[1:-1].strip()
-        # Sanity check: reject if response is drastically different in length
-        # (possible hallucination / summary). Accept up to 2x in either direction.
-        if len(cleaned) < len(text) * 0.5 or len(cleaned) > len(text) * 2:
+        # Sanity check: reject если текст укорочен сильнее чем до 30% (вероятно
+        # Haiku сделал summary вместо cleanup) или вырос >2x (галлюцинация).
+        # Нижняя граница ослаблена от 50%→30% потому что cleanup теперь имеет
+        # право удалять filler words / repetitions / meta-комментарии.
+        if len(cleaned) < len(text) * 0.3 or len(cleaned) > len(text) * 2:
             print(f"  [cleanup] skipped — length delta suspicious "
                   f"(orig {len(text)}, cleaned {len(cleaned)})", flush=True)
             return text
