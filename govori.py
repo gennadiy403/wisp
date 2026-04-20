@@ -1676,15 +1676,14 @@ def stop_and_transcribe():
 
     if text:
         print(f"→ {text}", flush=True)
+        paste_text(text + " ")
         if predict_mode:
             AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
                 lambda t=text: show_predict_menu(t)
             )
-        else:
-            paste_text(text + " ")
-            if auto_send:
-                time.sleep(0.3)
-                _press_enter()
+        elif auto_send:
+            time.sleep(0.3)
+            _press_enter()
     else:
         print("(empty)", flush=True)
 
@@ -2264,17 +2263,30 @@ def generate_rephrasings(text):
 
 class PredictController(AppKit.NSObject):
     _rephrasings = []
-    _picked = False
+    _pasted_len = 0
 
     def pickRephrasing_(self, sender):
         idx = sender.tag()
         if 0 <= idx < len(self._rephrasings):
-            self._picked = True
             text = self._rephrasings[idx]
+            n = self._pasted_len
             print(f"✦ rephrase: {text}", flush=True)
-            threading.Thread(
-                target=lambda t=text: paste_text(t + " "), daemon=True
-            ).start()
+            def _replace():
+                _delete_chars(n)
+                paste_text(text + " ")
+            threading.Thread(target=_replace, daemon=True).start()
+
+
+def _delete_chars(n):
+    """Send n Backspace key events to erase the previously-pasted text."""
+    if n <= 0:
+        return
+    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+    for _ in range(n):
+        ev = Quartz.CGEventCreateKeyboardEvent(src, 0x33, True)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        ev = Quartz.CGEventCreateKeyboardEvent(src, 0x33, False)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
 
 
 def setup_predict():
@@ -2283,19 +2295,20 @@ def setup_predict():
 
 
 def show_predict_menu(original_text):
-    """Generate rephrasings and show NSMenu. Pasting is deferred to the
-    pick handler; if the menu is dismissed without a pick, paste the original."""
+    """Generate rephrasings and show NSMenu. The original text has already
+    been pasted by stop_and_transcribe; if the user picks a rephrasing we
+    delete those chars and paste the replacement. On dismiss we leave the
+    original in place."""
     set_hud(True, "predict")
     rephrasings = generate_rephrasings(original_text)
     set_hud(False)
 
     if not rephrasings:
-        print("(no rephrasings — pasting original)", flush=True)
-        paste_text(original_text + " ")
+        print("(no rephrasings — keeping original)", flush=True)
         return
 
     _predict_controller._rephrasings = rephrasings
-    _predict_controller._picked = False
+    _predict_controller._pasted_len = len(original_text) + 1  # +1 for trailing space
 
     menu = AppKit.NSMenu.alloc().init()
     menu.setAutoenablesItems_(False)
@@ -2316,10 +2329,6 @@ def show_predict_menu(original_text):
 
     loc = AppKit.NSEvent.mouseLocation()
     menu.popUpMenuPositioningItem_atLocation_inView_(None, loc, None)
-
-    if not _predict_controller._picked:
-        print("(predict dismissed — pasting original)", flush=True)
-        paste_text(original_text + " ")
 
 
 # ── Hotkey (fn) ───────────────────────────────────────────────────────────────
