@@ -1371,7 +1371,7 @@ def audio_callback(indata, frames, time_info, status):
         audio_chunks.append(indata.copy())
 
 
-def start_recording():
+def start_recording(show_hud=True):
     global recording, audio_chunks, audio_stream, auto_send, cancelled, _retry_count
     with _state_lock:
         if recording:
@@ -1404,6 +1404,12 @@ def start_recording():
             set_hud(True, mode="error_fatal", tooltip=_tooltip(tooltip_key))
             print(f"! Mic error: {e}", flush=True)
             return
+    if not show_hud:
+        return
+    _show_recording_hud()
+
+
+def _show_recording_hud():
     if note_mode:
         hud_mode = "note"
         icon = "✎"
@@ -1682,7 +1688,7 @@ def stop_and_transcribe():
         print("(empty)", flush=True)
 
 
-def cancel_recording(skip_hud=False):
+def cancel_recording(skip_hud=False, quiet=False):
     global recording, transcribing, audio_stream, audio_chunks, cancelled, predict_mode, note_mode
     with _state_lock:
         cancelled    = True
@@ -1697,7 +1703,8 @@ def cancel_recording(skip_hud=False):
         audio_chunks = []
     if not skip_hud:
         set_hud(False)
-    print("(cancelled)", flush=True)
+    if not quiet:
+        print("(cancelled)", flush=True)
 
 # ── Paste / Enter ─────────────────────────────────────────────────────────────
 def paste_text(text):
@@ -2310,11 +2317,10 @@ _fn_press_time = 0
 
 _shift_held  = False
 _option_held = False
-_start_pending = False
 
 
 def cg_event_callback(proxy, event_type, event, refcon):
-    global prev_fn_down, _fn_press_time, _shift_held, _option_held, note_mode, predict_mode, _start_pending
+    global prev_fn_down, _fn_press_time, _shift_held, _option_held, note_mode, predict_mode
 
     # Mouse routing: HUD is an NSPanel that can't receive native mouse events;
     # we dispatch via CGEventTap so click-to-retry and pointer cursor still work.
@@ -2377,34 +2383,38 @@ def cg_event_callback(proxy, event_type, event, refcon):
 
     if is_down and not prev_fn_down:
         _fn_press_time = time.time()
-        _start_pending = True
-        def delayed_start():
-            global _start_pending, predict_mode, note_mode
+        if _shift_held and NOTES_CFG:
+            note_mode    = True
+            predict_mode = False
+        elif _option_held:
+            predict_mode = True
+            note_mode    = False
+        else:
+            predict_mode = False
+            note_mode    = False
+        print(
+            f"[mode] shift={_shift_held} option={_option_held} "
+            f"→ note={note_mode} predict={predict_mode}",
+            flush=True,
+        )
+        threading.Thread(
+            target=lambda: start_recording(show_hud=False), daemon=True
+        ).start()
+        def _show_hud_delayed():
             time.sleep(0.20)
-            if not prev_fn_down or not _start_pending:
-                _start_pending = False
-                return
-            _start_pending = False
-            if _shift_held and NOTES_CFG:
-                note_mode    = True
-                predict_mode = False
-            elif _option_held:
-                predict_mode = True
-                note_mode    = False
-            else:
-                predict_mode = False
-                note_mode    = False
-            print(
-                f"[mode] shift={_shift_held} option={_option_held} "
-                f"→ note={note_mode} predict={predict_mode}",
-                flush=True,
-            )
-            start_recording()
-        threading.Thread(target=delayed_start, daemon=True).start()
+            if recording and not cancelled:
+                _show_recording_hud()
+        threading.Thread(target=_show_hud_delayed, daemon=True).start()
     elif not is_down and prev_fn_down:
-        _start_pending = False
         if recording:
-            threading.Thread(target=stop_and_transcribe, daemon=True).start()
+            held = time.time() - _fn_press_time
+            if held < 0.20:
+                threading.Thread(
+                    target=lambda: cancel_recording(skip_hud=True, quiet=True),
+                    daemon=True,
+                ).start()
+            else:
+                threading.Thread(target=stop_and_transcribe, daemon=True).start()
 
     prev_fn_down = is_down
     return event
