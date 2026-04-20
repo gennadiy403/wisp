@@ -690,6 +690,110 @@ def cli_plugin(args):
         sys.exit(1)
 
 
+def cli_add(args):
+    """Add words to vocabulary (terms.md/people.md), rebuild whisper_prompt, sync to VPS.
+
+    Usage: govori add [-p|-t] <word>...
+      -p, --people   append to people.md (format: "Имя Фамилия — контекст")
+      -t, --terms    append to terms.md (default)
+    """
+    target = "terms"
+    words = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-p", "--people"):
+            target = "people"
+        elif a in ("-t", "--terms"):
+            target = "terms"
+        elif a in ("-h", "--help"):
+            print("Usage: govori add [-p|-t] <word>...")
+            print("  -p, --people   append to people.md (format: 'Имя — контекст')")
+            print("  -t, --terms    append to terms.md (default)")
+            sys.exit(0)
+        else:
+            words.append(a)
+        i += 1
+
+    if not words:
+        print("Usage: govori add [-p|-t] <word>...")
+        sys.exit(1)
+
+    target_file = CONFIG_DIR / ("people.md" if target == "people" else "terms.md")
+    if not target_file.exists():
+        print(f"Vocabulary file not found: {target_file}")
+        sys.exit(1)
+
+    def _key(s):
+        """Normalize a line for dedup — for people compare only left of dash."""
+        s = s.strip()
+        if target == "people" and "—" in s:
+            s = s.split("—", 1)[0].strip()
+        return s.lower()
+
+    existing = set()
+    for line in target_file.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        existing.add(_key(s))
+
+    added, skipped = [], []
+    for w in words:
+        k = _key(w)
+        if not k:
+            continue
+        if k in existing:
+            skipped.append(w)
+        else:
+            added.append(w)
+            existing.add(k)
+
+    if added:
+        text = target_file.read_text(encoding="utf-8")
+        if not text.endswith("\n"):
+            text += "\n"
+        text += "\n".join(added) + "\n"
+        target_file.write_text(text, encoding="utf-8")
+        print(f"✓ {target_file.name}: +{len(added)} ({', '.join(added)})")
+    if skipped:
+        print(f"  skipped (already present): {', '.join(skipped)}")
+    if not added:
+        sys.exit(0)
+
+    import subprocess
+
+    refresh = CONFIG_DIR / "refresh-prompt.sh"
+    if refresh.exists():
+        r = subprocess.run(["bash", str(refresh)], capture_output=True, text=True)
+        if r.returncode == 0:
+            for line in r.stdout.splitlines():
+                stripped = line.strip()
+                if stripped.startswith(("whisper_prompt:", "language:", "preview:")):
+                    print(f"  {stripped}")
+        else:
+            print(f"✗ refresh-prompt failed: {r.stderr.strip()}", file=sys.stderr)
+    else:
+        print(f"  (refresh-prompt.sh not found at {refresh}, skipping whisper_prompt rebuild)")
+
+    r = subprocess.run(
+        [
+            "rsync", "-az",
+            str(CONFIG_DIR / "config.yaml"),
+            str(CONFIG_DIR / "terms.md"),
+            str(CONFIG_DIR / "people.md"),
+            "vps:.config/govori/",
+        ],
+        capture_output=True, text=True,
+    )
+    if r.returncode == 0:
+        print("✓ synced to VPS")
+    else:
+        print(f"✗ VPS sync failed: {r.stderr.strip()}", file=sys.stderr)
+
+    sys.exit(0)
+
+
 VERSION = "0.1.0"
 
 
@@ -709,6 +813,10 @@ def cli_main():
 
     if positional and positional[0] == "plugin":
         cli_plugin(positional[1:])
+        sys.exit(0)
+
+    if positional and positional[0] == "add":
+        cli_add(positional[1:])
         sys.exit(0)
 
     if positional and positional[0] == "notes":
