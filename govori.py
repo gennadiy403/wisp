@@ -1676,14 +1676,15 @@ def stop_and_transcribe():
 
     if text:
         print(f"→ {text}", flush=True)
-        paste_text(text + " ")
         if predict_mode:
             AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
                 lambda t=text: show_predict_menu(t)
             )
-        elif auto_send:
-            time.sleep(0.3)
-            _press_enter()
+        else:
+            paste_text(text + " ")
+            if auto_send:
+                time.sleep(0.3)
+                _press_enter()
     else:
         print("(empty)", flush=True)
 
@@ -2229,8 +2230,8 @@ def _save_note_with_meta(text, duration_sec, meta):
 _predict_controller = None
 
 
-def generate_continuations(text):
-    """GPT-4o-mini generates 3 text continuations."""
+def generate_rephrasings(text):
+    """Generate 3 alternative phrasings of the given text, preserving meaning."""
     try:
         resp = client.chat.completions.create(
             model=CONFIG.get("predict_model", "llama-3.3-70b-versatile"),
@@ -2238,37 +2239,42 @@ def generate_continuations(text):
                 {
                     "role": "system",
                     "content": (
-                        "You are a text autocomplete assistant. "
-                        "Given the beginning of a text, suggest 3 natural continuations. "
-                        "Each continuation should be 5-20 words, completing the thought. "
-                        "Keep the same language as input. "
-                        "Return JSON: {\"continuations\": [\"...\", \"...\", \"...\"]}"
+                        "You are a rephrasing assistant. Given a piece of text, "
+                        "produce 3 distinct alternative phrasings that preserve "
+                        "the original meaning but vary in wording, tone, or "
+                        "structure. Keep roughly the same length and the SAME "
+                        "language as the input. Do not add or remove information. "
+                        "Return JSON: {\"rephrasings\": [\"...\", \"...\", \"...\"]}"
                     ),
                 },
                 {"role": "user", "content": text},
             ],
             response_format={"type": "json_object"},
-            max_tokens=200,
+            max_tokens=400,
             temperature=0.7,
         )
         data = json.loads(resp.choices[0].message.content)
-        items = data.get("continuations", [])
+        items = data.get("rephrasings", [])
         if isinstance(items, list) and len(items) >= 1:
             return [str(v) for v in items[:3]]
     except Exception as e:
-        print(f"Predict error: {e}", flush=True)
+        print(f"Rephrase error: {e}", flush=True)
     return []
 
 
 class PredictController(AppKit.NSObject):
-    _continuations = []
+    _rephrasings = []
+    _picked = False
 
-    def pickContinuation_(self, sender):
+    def pickRephrasing_(self, sender):
         idx = sender.tag()
-        if 0 <= idx < len(self._continuations):
-            text = self._continuations[idx]
-            print(f"✦ predict: {text}", flush=True)
-            threading.Thread(target=lambda t=text: paste_text(t), daemon=True).start()
+        if 0 <= idx < len(self._rephrasings):
+            self._picked = True
+            text = self._rephrasings[idx]
+            print(f"✦ rephrase: {text}", flush=True)
+            threading.Thread(
+                target=lambda t=text: paste_text(t + " "), daemon=True
+            ).start()
 
 
 def setup_predict():
@@ -2277,16 +2283,19 @@ def setup_predict():
 
 
 def show_predict_menu(original_text):
-    """Generate continuations and show NSMenu."""
+    """Generate rephrasings and show NSMenu. Pasting is deferred to the
+    pick handler; if the menu is dismissed without a pick, paste the original."""
     set_hud(True, "predict")
-    continuations = generate_continuations(original_text)
+    rephrasings = generate_rephrasings(original_text)
     set_hud(False)
 
-    if not continuations:
-        print("(no predictions)", flush=True)
+    if not rephrasings:
+        print("(no rephrasings — pasting original)", flush=True)
+        paste_text(original_text + " ")
         return
 
-    _predict_controller._continuations = continuations
+    _predict_controller._rephrasings = rephrasings
+    _predict_controller._picked = False
 
     menu = AppKit.NSMenu.alloc().init()
     menu.setAutoenablesItems_(False)
@@ -2295,9 +2304,9 @@ def show_predict_menu(original_text):
         AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameVibrantDark)
     )
 
-    for i, cont in enumerate(continuations):
+    for i, reph in enumerate(rephrasings):
         item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            cont, "pickContinuation:", str(i + 1)
+            reph, "pickRephrasing:", str(i + 1)
         )
         item.setTarget_(_predict_controller)
         item.setEnabled_(True)
@@ -2307,6 +2316,10 @@ def show_predict_menu(original_text):
 
     loc = AppKit.NSEvent.mouseLocation()
     menu.popUpMenuPositioningItem_atLocation_inView_(None, loc, None)
+
+    if not _predict_controller._picked:
+        print("(predict dismissed — pasting original)", flush=True)
+        paste_text(original_text + " ")
 
 
 # ── Hotkey (fn) ───────────────────────────────────────────────────────────────
