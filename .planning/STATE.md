@@ -5,7 +5,7 @@ milestone_name: milestone
 status: executing
 stopped_at: Phase 1 UI-SPEC approved
 last_updated: "2026-04-17T16:20:11.034Z"
-last_activity: 2026-04-19 -- Completed quick task 260420-0ik: speed up cleanup pipeline
+last_activity: 2026-04-22 -- Completed quick task 260422-bgo: fix fn quick-tap race condition
 progress:
   total_phases: 3
   completed_phases: 0
@@ -80,6 +80,7 @@ None yet.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260420-0ik | speed up cleanup pipeline: prompt caching, local regex fast-path, raise bypass threshold | 2026-04-19 | 49ce794 | [260420-0ik-speed-up-cleanup-pipeline-prompt-caching](./quick/260420-0ik-speed-up-cleanup-pipeline-prompt-caching/) |
+| 260422-bgo | fix fn quick-tap race condition: recording stuck True when fn released before thread ran | 2026-04-22 | 0775cd2 | [260422-bgo-fix-race-condition-fn-released-before-st](./quick/260422-bgo-fix-race-condition-fn-released-before-st/) |
 
 ## Deferred Items
 
