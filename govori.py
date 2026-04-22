@@ -1376,6 +1376,9 @@ def start_recording(show_hud=True):
     with _state_lock:
         if recording:
             return
+        if cancelled:                 # fn-up fired before we ran — abort silently
+            cancelled = False         # reset flag for next recording
+            return
         if audio_stream is not None:
             try:
                 audio_stream.stop()
