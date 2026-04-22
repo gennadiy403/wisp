@@ -2428,15 +2428,16 @@ def cg_event_callback(proxy, event_type, event, refcon):
                 _show_recording_hud()
         threading.Thread(target=_show_hud_delayed, daemon=True).start()
     elif not is_down and prev_fn_down:
-        if recording:
-            held = time.time() - _fn_press_time
-            if held < 0.20:
-                threading.Thread(
-                    target=lambda: cancel_recording(skip_hud=True, quiet=True),
-                    daemon=True,
-                ).start()
-            else:
-                threading.Thread(target=stop_and_transcribe, daemon=True).start()
+        held = time.time() - _fn_press_time
+        if held < 0.20:
+            # Always cancel on quick tap — covers race where start_recording
+            # thread hasn't set recording=True yet.
+            threading.Thread(
+                target=lambda: cancel_recording(skip_hud=True, quiet=True),
+                daemon=True,
+            ).start()
+        elif recording:
+            threading.Thread(target=stop_and_transcribe, daemon=True).start()
 
     prev_fn_down = is_down
     return event
