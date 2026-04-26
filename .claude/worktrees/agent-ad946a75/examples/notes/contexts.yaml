@@ -1,0 +1,18 @@
+# Define your life/work contexts here.
+# Each context has a key (used in filenames and metadata) and a description
+# (used by the AI classifier to understand when to assign this context).
+
+- key: work
+  description: >-
+    My day job. Anything related to tasks, meetings, colleagues, deadlines,
+    or projects at my employer.
+
+- key: side_project
+  description: >-
+    My side project / SaaS / open source work. Technical ideas, features,
+    bugs, launches, users.
+
+- key: personal
+  description: >-
+    Personal life — family, health, finance, travel, hobbies,
+    anything not related to work.

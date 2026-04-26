@@ -76,10 +76,6 @@ Frictionless voice-to-text on macOS — press a key, speak, text appears where y
 | YAML-only plugins | Safety (no code execution), simplicity | ✓ Good |
 | Cloud-only STT | Lower complexity, better accuracy than local Whisper | — Pending |
 
-## Related Documents
-
-- [PRODUCT-STRATEGY.md](./PRODUCT-STRATEGY.md) — модульная монетизация (core FREE + платные модули), 12-недельный план, pricing, license-инфра, market research. Стратегический слой: «что продаём и как». PROJECT.md — технический слой: «что уже есть в коде».
-
 ## Evolution
 
 This document evolves at phase transitions and milestone boundaries.

@@ -1,0 +1,8 @@
+#!/bin/bash
+# Resolve real script location even when invoked via symlink
+SCRIPT="$(readlink -f "$0" 2>/dev/null || python3 -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$0")"
+cd "$(dirname "$SCRIPT")"
+# Load secrets (ANTHROPIC_API_KEY etc.) if present
+[ -f "$HOME/.config/govori/env" ] && source "$HOME/.config/govori/env"
+source .venv/bin/activate
+python govori.py "$@"

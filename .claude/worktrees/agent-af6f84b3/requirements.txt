@@ -1,0 +1,9 @@
+openai
+anthropic
+sounddevice
+soundfile
+numpy
+av
+pyyaml
+pyobjc-framework-Cocoa
+pyobjc-framework-Quartz

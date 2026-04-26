@@ -80,7 +80,6 @@ def load_config():
         "whisper_prompt": "",
         "base_url": None,
         "api_key_env": "OPENAI_API_KEY",
-        "predict_model": "llama-3.3-70b-versatile",
     }
     cfg = _load_yaml(CONFIG_FILE)
     defaults.update(cfg)
@@ -116,120 +115,17 @@ def load_plugins():
     return plugins
 
 
-_PROMPT_BUDGET_BYTES = 896   # Groq whisper-large-v3-turbo hard limit (UTF-8 BYTES, not chars)
-_PROMPT_BUDGET_CHARS = _PROMPT_BUDGET_BYTES   # legacy alias
-
-
-def _tokenize_prompt_terms(text):
-    """Split a prompt string into individual vocabulary terms.
-
-    For segments containing a colon (e.g. "Проекты: Marquiz, SKVO"), keep only
-    the part after the last colon so category labels are discarded. Long phrases
-    (> 40 chars) are dropped — they're instructional preamble, which Whisper
-    ignores anyway.
-    """
-    terms = []
-    for part in re.split(r'[,.;\n]', text):
-        part = part.strip()
-        if not part:
-            continue
-        if ':' in part:
-            part = part.rsplit(':', 1)[1].strip()
-        if part and len(part) <= 40:
-            terms.append(part)
-    return terms
-
-
-def _notes_corpus_text(plugins):
-    """Lowercased concatenation of all .md notes under plugin output_dirs.
-
-    Used for frequency scoring of prompt terms. Returns "" when no notes exist.
-    """
-    bases = set()
-    for plugin in plugins.values():
-        out = plugin.get("output_dir")
-        if not out:
-            continue
-        base_str = out.split('{', 1)[0].rstrip('/') or out
-        bases.add(Path(base_str).expanduser())
-
-    chunks = []
-    for base in bases:
-        if not base.exists():
-            continue
-        for md in base.rglob("*.md"):
-            try:
-                chunks.append(md.read_text(encoding="utf-8", errors="ignore"))
-            except Exception:
-                continue
-    return "\n".join(chunks).lower()
-
-
-def build_whisper_prompt(config, plugins, budget_bytes=_PROMPT_BUDGET_BYTES):
-    """Assemble a byte-budget-constrained Whisper prompt from config + plugin vocabularies.
-
-    Auto-prioritises by term usage frequency in past transcriptions (case-
-    insensitive substring count over notes corpus), so frequently-dictated
-    terms float to the top and unseen terms get a baseline score of 1 (not
-    dropped on first sight). Greedy-packs into `budget_bytes` of UTF-8 output
-    (Groq whisper-large-v3-turbo enforces a byte limit, not a char limit —
-    each cyrillic character costs 2 bytes, so an all-cyrillic prompt of
-    budget_bytes/2 chars is the practical maximum).
-    """
-    raw_parts = []
-    base_cfg = config.get("whisper_prompt", "").strip()
-    if base_cfg:
-        raw_parts.append(base_cfg)
-    for plugin in plugins.values():
+def build_whisper_prompt(config, plugins):
+    """Merge base whisper_prompt with plugin-level prompts."""
+    parts = []
+    base = config.get("whisper_prompt", "").strip()
+    if base:
+        parts.append(base)
+    for name, plugin in plugins.items():
         p = plugin.get("whisper_prompt", "").strip()
         if p:
-            raw_parts.append(p)
-
-    seen = set()
-    terms = []
-    for part in raw_parts:
-        for t in _tokenize_prompt_terms(part):
-            key = t.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            terms.append(t)
-    if not terms:
-        return ""
-
-    corpus = _notes_corpus_text(plugins)
-    scored = sorted(
-        (-max(1, corpus.count(t.lower())), idx, t) for idx, t in enumerate(terms)
-    )
-
-    kept, dropped = [], []
-    remaining = budget_bytes
-    for _, _, term in scored:
-        # UTF-8 byte cost: cyrillic chars cost 2 bytes each. Groq enforces a byte
-        # limit, not a char limit. `, ` separator is ASCII (2 bytes).
-        cost = len(term.encode("utf-8")) + (2 if kept else 0)
-        if cost <= remaining:
-            kept.append(term)
-            remaining -= cost
-        else:
-            dropped.append(term)
-
-    used = budget_bytes - remaining
-    if dropped:
-        preview = ", ".join(dropped[:6])
-        more = f" +{len(dropped) - 6}" if len(dropped) > 6 else ""
-        print(
-            f"  whisper_prompt: {len(kept)} kept, {len(dropped)} dropped "
-            f"({used}/{budget_bytes} bytes) — dropped: {preview}{more}",
-            flush=True,
-        )
-    else:
-        print(
-            f"  whisper_prompt: {len(kept)} terms ({used}/{budget_bytes} bytes)",
-            flush=True,
-        )
-
-    return ", ".join(kept)
+            parts.append(p)
+    return " ".join(parts)
 
 
 def build_notes_config(plugins):
@@ -442,10 +338,9 @@ SETUP_STRINGS = {
 TOOLTIP_STRINGS = {
     "en": {
         "api_timeout": "Transcription timed out. Click to retry.",
-        "api_network": "Connection lost",
+        "api_network": "Connection failed. Click to retry.",
         "api_server": "Server error. Click to retry.",
-        "retry_attempt": "Retrying... (attempt {n}/{total})",
-        "attempt_progress": "No connection {n}/{total}{dots}",
+        "retry_attempt": "Retrying... (attempt {n}/3)",
         "retry_exhausted": "Transcription failed. Try recording again.",
         "no_mic": "No microphone found.",
         "mic_denied": "Microphone access denied.",
@@ -453,10 +348,9 @@ TOOLTIP_STRINGS = {
     },
     "ru": {
         "api_timeout": "Транскрипция не ответила. Нажми для повтора.",
-        "api_network": "\u041e\u0431\u0440\u044b\u0432 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f",
+        "api_network": "Нет соединения. Нажми для повтора.",
         "api_server": "Ошибка сервера. Нажми для повтора.",
-        "retry_attempt": "Повтор... (попытка {n}/{total})",
-        "attempt_progress": "\u041d\u0435\u0442 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f {n}/{total}{dots}",
+        "retry_attempt": "Повтор... (попытка {n}/3)",
         "retry_exhausted": "Не удалось распознать. Попробуй записать ещё раз.",
         "no_mic": "Микрофон не найден.",
         "mic_denied": "Доступ к микрофону запрещён.",
@@ -536,15 +430,7 @@ def cli_setup(force=False):
     # Step 2: Privacy notice
     print(s["step_privacy"])
 
-    # Step 3: Accessibility — trigger system prompt
-    import ctypes, objc
-    from Foundation import NSDictionary
-    _hi = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices')
-    _hi.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
-    _hi.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
-    _hi.AXIsProcessTrustedWithOptions(
-        objc.pyobjc_id(NSDictionary.dictionaryWithObject_forKey_(True, 'AXTrustedCheckOptionPrompt'))
-    )
+    # Step 3: Accessibility
     print(s["step_access"])
     _ask(s["ask_access_done"])
 
@@ -690,110 +576,6 @@ def cli_plugin(args):
         sys.exit(1)
 
 
-def cli_add(args):
-    """Add words to vocabulary (terms.md/people.md), rebuild whisper_prompt, sync to VPS.
-
-    Usage: govori add [-p|-t] <word>...
-      -p, --people   append to people.md (format: "Имя Фамилия — контекст")
-      -t, --terms    append to terms.md (default)
-    """
-    target = "terms"
-    words = []
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a in ("-p", "--people"):
-            target = "people"
-        elif a in ("-t", "--terms"):
-            target = "terms"
-        elif a in ("-h", "--help"):
-            print("Usage: govori add [-p|-t] <word>...")
-            print("  -p, --people   append to people.md (format: 'Имя — контекст')")
-            print("  -t, --terms    append to terms.md (default)")
-            sys.exit(0)
-        else:
-            words.append(a)
-        i += 1
-
-    if not words:
-        print("Usage: govori add [-p|-t] <word>...")
-        sys.exit(1)
-
-    target_file = CONFIG_DIR / ("people.md" if target == "people" else "terms.md")
-    if not target_file.exists():
-        print(f"Vocabulary file not found: {target_file}")
-        sys.exit(1)
-
-    def _key(s):
-        """Normalize a line for dedup — for people compare only left of dash."""
-        s = s.strip()
-        if target == "people" and "—" in s:
-            s = s.split("—", 1)[0].strip()
-        return s.lower()
-
-    existing = set()
-    for line in target_file.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        existing.add(_key(s))
-
-    added, skipped = [], []
-    for w in words:
-        k = _key(w)
-        if not k:
-            continue
-        if k in existing:
-            skipped.append(w)
-        else:
-            added.append(w)
-            existing.add(k)
-
-    if added:
-        text = target_file.read_text(encoding="utf-8")
-        if not text.endswith("\n"):
-            text += "\n"
-        text += "\n".join(added) + "\n"
-        target_file.write_text(text, encoding="utf-8")
-        print(f"✓ {target_file.name}: +{len(added)} ({', '.join(added)})")
-    if skipped:
-        print(f"  skipped (already present): {', '.join(skipped)}")
-    if not added:
-        sys.exit(0)
-
-    import subprocess
-
-    refresh = CONFIG_DIR / "refresh-prompt.sh"
-    if refresh.exists():
-        r = subprocess.run(["bash", str(refresh)], capture_output=True, text=True)
-        if r.returncode == 0:
-            for line in r.stdout.splitlines():
-                stripped = line.strip()
-                if stripped.startswith(("whisper_prompt:", "language:", "preview:")):
-                    print(f"  {stripped}")
-        else:
-            print(f"✗ refresh-prompt failed: {r.stderr.strip()}", file=sys.stderr)
-    else:
-        print(f"  (refresh-prompt.sh not found at {refresh}, skipping whisper_prompt rebuild)")
-
-    r = subprocess.run(
-        [
-            "rsync", "-az",
-            str(CONFIG_DIR / "config.yaml"),
-            str(CONFIG_DIR / "terms.md"),
-            str(CONFIG_DIR / "people.md"),
-            "vps:.config/govori/",
-        ],
-        capture_output=True, text=True,
-    )
-    if r.returncode == 0:
-        print("✓ synced to VPS")
-    else:
-        print(f"✗ VPS sync failed: {r.stderr.strip()}", file=sys.stderr)
-
-    sys.exit(0)
-
-
 VERSION = "0.1.0"
 
 
@@ -813,10 +595,6 @@ def cli_main():
 
     if positional and positional[0] == "plugin":
         cli_plugin(positional[1:])
-        sys.exit(0)
-
-    if positional and positional[0] == "add":
-        cli_add(positional[1:])
         sys.exit(0)
 
     if positional and positional[0] == "notes":
@@ -850,8 +628,6 @@ cli_main()
 WHISPER_HALLUCINATIONS = {
     "продолжение следует", "спасибо за просмотр", "спасибо за внимание",
     "субтитры создал", "субтитры сделал", "субтитры подготовил",
-    "субтитры создавал dimatorzok",
-    "редактор субтитров а.семкин корректор а.кулакова",
     "подписывайтесь на канал", "подпишитесь на канал",
     "до свидания", "до новых встреч", "пока",
     "thanks for watching", "thank you for watching",
@@ -868,9 +644,9 @@ if not _api_key:
     sys.exit(1)
 _base_url = CONFIG.get("base_url")
 client = (
-    OpenAI(api_key=_api_key, base_url=_base_url, timeout=5.0, max_retries=0)
+    OpenAI(api_key=_api_key, base_url=_base_url, timeout=30.0, max_retries=0)
     if _base_url
-    else OpenAI(api_key=_api_key, timeout=5.0, max_retries=0)
+    else OpenAI(api_key=_api_key, timeout=30.0, max_retries=0)
 )
 
 # Anthropic client — lazy, only if note mode is used
@@ -903,6 +679,7 @@ note_mode    = False
 _retry_buffer = None      # audio chunks saved for retry
 _retry_count = 0          # current retry attempt count
 _hud_error_mode = None    # current error mode: "error_retryable", "error_fatal", or None
+_hud_click_handler = None # HUDClickHandler instance
 
 if "_NOTES_CLI_ARGS" not in globals() and "_NOTE_CLI_TEXT" not in globals():
     print("Govori ready.", flush=True)
@@ -915,13 +692,11 @@ if "_NOTES_CLI_ARGS" not in globals() and "_NOTE_CLI_TEXT" not in globals():
 # ── HUD ───────────────────────────────────────────────────────────────────────
 hud_window = None
 hud_label  = None
-hud_container = None
 
 _HUD_S = 32
 
-
 def setup_hud():
-    global hud_window, hud_label, hud_container
+    global hud_window, hud_label
 
     screen = AppKit.NSScreen.mainScreen().frame()
     # Position: bottom-left corner (aligned with optional Hammerspoon status HUD).
@@ -974,60 +749,9 @@ def setup_hud():
 
     hud_window = win
     hud_label  = label
-    hud_container = container
 
     _setup_tooltip()
-    _setup_countdown()
-
-
-# ── Countdown digit panel (floats above HUD during retry attempts) ───────────
-_countdown_panel = None
-_countdown_label = None
-
-_COUNTDOWN_W = _HUD_S
-_COUNTDOWN_H = 18
-
-
-def _setup_countdown():
-    """Small transparent panel that shows a single white digit above the HUD."""
-    global _countdown_panel, _countdown_label
-    style = AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel
-    panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-        AppKit.NSMakeRect(6, _HUD_S + 2, _COUNTDOWN_W, _COUNTDOWN_H), style,
-        AppKit.NSBackingStoreBuffered, False,
-    )
-    panel.setLevel_(AppKit.NSFloatingWindowLevel + 1)
-    panel.setOpaque_(False)
-    panel.setBackgroundColor_(AppKit.NSColor.clearColor())
-    panel.setIgnoresMouseEvents_(True)
-    panel.setCollectionBehavior_(
-        AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
-        | AppKit.NSWindowCollectionBehaviorStationary
-        | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
-    )
-    label = AppKit.NSTextField.labelWithString_("")
-    label.setFrame_(AppKit.NSMakeRect(0, 0, _COUNTDOWN_W, _COUNTDOWN_H))
-    label.setFont_(AppKit.NSFont.boldSystemFontOfSize_(13))
-    label.setTextColor_(
-        AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.65)
-    )
-    label.setAlignment_(AppKit.NSTextAlignmentCenter)
-    panel.contentView().addSubview_(label)
-    panel.orderOut_(None)
-    _countdown_panel = panel
-    _countdown_label = label
-
-
-def _show_countdown(count):
-    if _countdown_panel is None:
-        return
-    _countdown_label.setStringValue_(str(count))
-    _countdown_panel.orderFrontRegardless()
-
-
-def _hide_countdown():
-    if _countdown_panel is not None:
-        _countdown_panel.orderOut_(None)
+    _setup_hud_click()
 
 
 # ── Tooltip companion panel ──────────────────────────────────────────────────
@@ -1035,50 +759,21 @@ _tooltip_panel = None
 _tooltip_label = None
 
 
-_TOOLTIP_X = 42   # HUD ends at x=38 (6+32) → small gap keeps pill edges readable
-_TOOLTIP_W_MAX = 380   # wrap point for very long messages
-_TOOLTIP_PAD_X = 12
-_TOOLTIP_PAD_Y = 7
-
-# Tooltip background tints tie the plate to the HUD state so the pair reads as
-# one status element (Practical UI: "Use system colours to indicate status").
-_TOOLTIP_BG_BY_STATE = {
-    "error_retryable": (0.30, 0.22, 0.08, 0.70),  # amber, semi-transparent
-    "error_fatal":     (0.32, 0.10, 0.10, 0.72),  # red, semi-transparent
-    "transcribing":    (0.10, 0.10, 0.10, 0.70),  # neutral
-}
-_TOOLTIP_BORDER_BY_STATE = {
-    "error_retryable": (1.0, 0.75, 0.25, 0.35),
-    "error_fatal":     (1.0, 0.35, 0.35, 0.40),
-    "transcribing":    (1.0, 1.0, 1.0, 0.08),
-}
-
-
 def _setup_tooltip():
     """Create tooltip companion NSPanel positioned next to HUD."""
     global _tooltip_panel, _tooltip_label
     style = AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel
     panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-        AppKit.NSMakeRect(_TOOLTIP_X, 0, _TOOLTIP_W_MAX, _HUD_S), style,
+        AppKit.NSMakeRect(42, 0, 240, 24), style,
         AppKit.NSBackingStoreBuffered, False,
     )
     panel.setLevel_(AppKit.NSFloatingWindowLevel + 1)
     panel.setOpaque_(False)
-    # Window background must be clear; all visuals live on the content layer so
-    # the rounded border renders once, not stacked over a rectangular window fill.
-    panel.setBackgroundColor_(AppKit.NSColor.clearColor())
-    panel.setHasShadow_(False)
+    panel.setBackgroundColor_(
+        AppKit.NSColor.colorWithRed_green_blue_alpha_(0.15, 0.15, 0.15, 0.92)
+    )
     panel.contentView().setWantsLayer_(True)
-    layer = panel.contentView().layer()
-    layer.setCornerRadius_(_HUD_S / 2)  # match HUD roundness → pill shape
-    layer.setMasksToBounds_(True)
-    layer.setBorderWidth_(1.0)
-    layer.setBackgroundColor_(
-        AppKit.NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.10, 0.70).CGColor()
-    )
-    layer.setBorderColor_(
-        AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.12).CGColor()
-    )
+    panel.contentView().layer().setCornerRadius_(6)
     panel.setIgnoresMouseEvents_(True)
     panel.setCollectionBehavior_(
         AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
@@ -1086,53 +781,25 @@ def _setup_tooltip():
         | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
     )
     label = AppKit.NSTextField.labelWithString_("")
-    label.setFont_(AppKit.NSFont.systemFontOfSize_(12))
+    label.setFont_(AppKit.NSFont.systemFontOfSize_(11))
     label.setTextColor_(AppKit.NSColor.colorWithRed_green_blue_alpha_(0.95, 0.95, 0.95, 1.0))
-    label.setPreferredMaxLayoutWidth_(_TOOLTIP_W_MAX - 2 * _TOOLTIP_PAD_X)
+    label.setPreferredMaxLayoutWidth_(224)  # 240 - 2*8 padding
     label.setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
+    label.setFrame_(AppKit.NSMakeRect(8, 4, 224, 16))
     panel.contentView().addSubview_(label)
     panel.orderOut_(None)
     _tooltip_panel = panel
     _tooltip_label = label
 
 
-def _show_tooltip(text, mode="transcribing"):
-    """Show tooltip panel with text. Must be called on main queue.
-
-    Height grows with wrapped content; the panel stays vertically centered on the
-    HUD circle so the two read as one paired status element (Fitts's law).
-    Background tint follows `mode` to tie the plate to the HUD status colour.
-    """
+def _show_tooltip(text):
+    """Show tooltip panel with text. Must be called on main queue."""
     if _tooltip_panel is None:
         return
-
-    bg = _TOOLTIP_BG_BY_STATE.get(mode, _TOOLTIP_BG_BY_STATE["transcribing"])
-    border = _TOOLTIP_BORDER_BY_STATE.get(mode, _TOOLTIP_BORDER_BY_STATE["transcribing"])
-    layer = _tooltip_panel.contentView().layer()
-    layer.setBackgroundColor_(
-        AppKit.NSColor.colorWithRed_green_blue_alpha_(*bg).CGColor()
-    )
-    layer.setBorderColor_(
-        AppKit.NSColor.colorWithRed_green_blue_alpha_(*border).CGColor()
-    )
-
-    # Measure text size precisely via attributed string — sizeToFit with
-    # preferredMaxLayoutWidth can cache stale values across calls.
-    attrs = {AppKit.NSFontAttributeName: _tooltip_label.font()}
-    measured = AppKit.NSString.stringWithString_(text).sizeWithAttributes_(attrs)
-    text_w = int(measured.width) + 4  # +4 antialiasing slack
-    text_h = int(measured.height) + 2
     _tooltip_label.setStringValue_(text)
-    panel_w = min(_TOOLTIP_W_MAX, text_w + 2 * _TOOLTIP_PAD_X)
-    h = max(_HUD_S, text_h + 2 * _TOOLTIP_PAD_Y)
-    label_y = (h - text_h) // 2
-    _tooltip_label.setFrame_(
-        AppKit.NSMakeRect(_TOOLTIP_PAD_X, label_y, panel_w - 2 * _TOOLTIP_PAD_X, text_h)
-    )
-    panel_y = int(_HUD_S / 2 - h / 2)
-    _tooltip_panel.setFrame_display_(
-        AppKit.NSMakeRect(_TOOLTIP_X, panel_y, panel_w, h), True
-    )
+    _tooltip_label.sizeToFit()
+    h = max(24, int(_tooltip_label.frame().size.height) + 16)
+    _tooltip_panel.setFrame_display_(AppKit.NSMakeRect(42, 0, 240, h), True)
     _tooltip_panel.orderFrontRegardless()
 
 
@@ -1142,112 +809,35 @@ def _hide_tooltip():
         _tooltip_panel.orderOut_(None)
 
 
-# ── HUD click + cursor routing ───────────────────────────────────────────────
-def _hud_click_action():
-    global _retry_count
-    if _hud_error_mode != "error_retryable":
-        return
-    if _retry_buffer is None:
-        return
-    _retry_count += 1
-    if _retry_count > 3:
-        set_hud(True, mode="error_fatal", tooltip=_tooltip("retry_exhausted"))
-        return
-    set_hud(True, mode="transcribing", tooltip=_tooltip("retry_attempt", n=_retry_count, total=3))
-    threading.Thread(target=_retry_transcription, daemon=True).start()
-
-
-_hud_pressed = False
-
-
-def _hud_apply_press(pressed):
-    """Visual press feedback: white fill + dark icon while button is held."""
-    if hud_container is None or hud_label is None:
-        return
-    if pressed:
-        hud_container.layer().setBackgroundColor_(
-            AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.95).CGColor()
-        )
-        hud_label.setTextColor_(
-            AppKit.NSColor.colorWithRed_green_blue_alpha_(0.15, 0.15, 0.15, 1.0)
-        )
-    else:
-        hud_container.layer().setBackgroundColor_(
-            AppKit.NSColor.colorWithRed_green_blue_alpha_(0.10, 0.10, 0.10, 0.85).CGColor()
-        )
-        # Restore icon color for the current error mode
-        if _hud_error_mode == "error_retryable":
-            hud_label.setTextColor_(
-                AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 0.85, 0.3, 1.0)
-            )
-        elif _hud_error_mode == "error_fatal":
-            hud_label.setTextColor_(
-                AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 0.3, 0.3, 1.0)
-            )
-
-
-def _point_inside_hud(event):
-    """Return True if the CG event location falls inside the HUD panel frame."""
-    if hud_window is None or not hud_window.isVisible():
-        return False
-    loc = Quartz.CGEventGetLocation(event)
-    frame = hud_window.frame()
-    screen_h = AppKit.NSScreen.mainScreen().frame().size.height
-    y_cocoa = screen_h - loc.y  # CG is top-origin, Cocoa is bottom-origin
-    return (
-        frame.origin.x <= loc.x <= frame.origin.x + frame.size.width
-        and frame.origin.y <= y_cocoa <= frame.origin.y + frame.size.height
-    )
-
-
-def _route_mouse_to_hud(event_type, event):
-    """Route clicks to the HUD because its non-activating NSPanel can't receive
-    native mouse events. Cursor changes aren't possible for background apps on
-    macOS — press animation carries the interactive affordance instead.
-
-    mouseDown inside → fill HUD white. mouseUp inside → fire retry.
-    mouseUp outside (drag-out) cancels the press silently.
-    """
-    global _hud_pressed
-    is_error = _hud_error_mode in ("error_retryable", "error_fatal")
-    inside = is_error and _point_inside_hud(event)
-
-    if event_type == Quartz.kCGEventLeftMouseDown:
-        if inside:
-            _hud_pressed = True
-            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
-                lambda: _hud_apply_press(True)
-            )
-        return
-
-    if event_type == Quartz.kCGEventLeftMouseUp:
-        if _hud_pressed:
-            was_pressed = _hud_pressed
-            _hud_pressed = False
-            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
-                lambda: _hud_apply_press(False)
-            )
-            # Only fire action if mouse is still over the HUD at release
-            if was_pressed and inside:
-                AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_hud_click_action)
-        return
-
-
+# ── HUD click handler ────────────────────────────────────────────────────────
+class HUDClickHandler(AppKit.NSObject):
+    def handleClick_(self, sender):
+        global _retry_count
+        if _hud_error_mode != "error_retryable":
+            return
+        if _retry_buffer is None:
+            return
+        _retry_count += 1
+        if _retry_count > 3:
+            # Max retries exhausted per UI-SPEC
+            set_hud(True, mode="error_fatal", tooltip=_tooltip("retry_exhausted"))
+            return
+        set_hud(True, mode="transcribing", tooltip=_tooltip("retry_attempt", n=_retry_count))
+        threading.Thread(target=_retry_transcription, daemon=True).start()
 
 
 def _retry_transcription():
-    """Re-transcribe using _retry_buffer. Runs in daemon thread after user click."""
+    """Re-transcribe using _retry_buffer. Called from HUDClickHandler in daemon thread."""
     global _retry_buffer, _retry_count
     buf_copy = _retry_buffer  # local ref -- safe from race
     if buf_copy is None:
         return
     # Replicate the encoding step from stop_and_transcribe
     audio = np.concatenate(buf_copy, axis=0).flatten()
-    duration = len(audio) / SAMPLE_RATE
-    text = _encode_and_transcribe(audio, timeout=_timeout_for_duration(duration))
+    text = _encode_and_transcribe(audio)
     if text is None:
         # Still failing -- show retryable error again
-        set_hud(True, mode="error_retryable", tooltip=_tooltip("api_network"))
+        set_hud(True, mode="error_retryable", tooltip=_tooltip("api_timeout"))
         return
     if not text or text in WHISPER_HALLUCINATIONS or _is_hallucination(text):
         print("(empty)", flush=True)
@@ -1260,7 +850,17 @@ def _retry_transcription():
     set_hud(False)
 
 
-def set_hud(visible, mode="recording", tooltip=None, count=None):
+def _setup_hud_click():
+    """Wire click gesture recognizer to HUD window."""
+    global _hud_click_handler
+    _hud_click_handler = HUDClickHandler.alloc().init()
+    recognizer = AppKit.NSClickGestureRecognizer.alloc().initWithTarget_action_(
+        _hud_click_handler, "handleClick:"
+    )
+    hud_window.contentView().addGestureRecognizer_(recognizer)
+
+
+def set_hud(visible, mode="recording", tooltip=None):
     global _hud_error_mode
 
     def _update():
@@ -1277,15 +877,6 @@ def set_hud(visible, mode="recording", tooltip=None, count=None):
             hud_label.setTextColor_(
                 AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 0.85, 0.3, 1.0)
             )
-        elif mode == "countdown":
-            # "Connection broken" glyph: downwards zigzag arrow reads as a severed
-            # signal line. Warm warning orange signals the disconnected state.
-            hud_label.setStringValue_("\u21af")
-            hud_label.setTextColor_(
-                AppKit.NSColor.colorWithRed_green_blue_alpha_(1.0, 0.55, 0.25, 1.0)
-            )
-            hud_label.setWantsLayer_(True)
-            hud_label.layer().removeAnimationForKey_("pulse")
         elif mode == "predict":
             hud_label.setStringValue_("✦")
             hud_label.setTextColor_(
@@ -1341,31 +932,29 @@ def set_hud(visible, mode="recording", tooltip=None, count=None):
             hud_window.setIgnoresMouseEvents_(False)
         else:
             hud_window.setIgnoresMouseEvents_(True)
-            if not tooltip:
-                _hide_tooltip()
+            _hide_tooltip()
             _hud_error_mode = None
             # Remove error pulse animation when leaving error mode
             hud_label.setWantsLayer_(True)
             hud_label.layer().removeAnimationForKey_("pulse")
-
-        # Countdown digit panel visibility follows mode
-        if mode == "countdown" and count is not None:
-            _show_countdown(count)
-        else:
-            _hide_countdown()
 
         if visible:
             hud_window.setFrameOrigin_(AppKit.NSMakePoint(6, 0))
             hud_window.orderFrontRegardless()
         else:
             hud_window.orderOut_(None)
-            _hide_countdown()
 
     AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_update)
 
-    # Tooltip plate intentionally disabled — the HUD icon alone carries state.
-    # The `tooltip` parameter stays accepted so call sites don't need to change.
-    AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_hide_tooltip)
+    # Tooltip display with delay (in background thread to avoid blocking main queue)
+    if tooltip and mode in ("error_retryable", "error_fatal"):
+        delay = 1.5 if mode == "error_retryable" else 0.5
+        def _show_delayed():
+            time.sleep(delay)
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                lambda: _show_tooltip(tooltip)
+            )
+        threading.Thread(target=_show_delayed, daemon=True).start()
 
 # ── Audio ─────────────────────────────────────────────────────────────────────
 def audio_callback(indata, frames, time_info, status):
@@ -1373,14 +962,11 @@ def audio_callback(indata, frames, time_info, status):
         audio_chunks.append(indata.copy())
 
 
-def _start_mic_stream():
-    # Initialize PortAudio input stream. State flags (recording, cancelled,
-    # audio_chunks, _retry_count, auto_send) must already be set synchronously
-    # by the caller under _state_lock.
-    global audio_stream, recording
+def start_recording():
+    global recording, audio_chunks, audio_stream, auto_send, cancelled, _retry_count
     with _state_lock:
-        if not recording or cancelled:
-            return  # fn-up beat us / cancelled before we started
+        if recording:
+            return
         if audio_stream is not None:
             try:
                 audio_stream.stop()
@@ -1388,24 +974,15 @@ def _start_mic_stream():
             except Exception:
                 pass
             audio_stream = None
-        try:
-            audio_stream = sd.InputStream(
-                samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=audio_callback,
-            )
-            audio_stream.start()
-        except sd.PortAudioError as e:
-            recording = False
-            audio_stream = None
-            err_str = str(e).lower()
-            if "permission" in err_str or "denied" in err_str:
-                tooltip_key = "mic_denied"
-            else:
-                tooltip_key = "no_mic"
-            set_hud(True, mode="error_fatal", tooltip=_tooltip(tooltip_key))
-            print(f"! Mic error: {e}", flush=True)
-
-
-def _show_recording_hud():
+        recording    = True
+        auto_send    = False
+        cancelled    = False
+        _retry_count = 0
+        audio_chunks = []
+        audio_stream = sd.InputStream(
+            samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=audio_callback,
+        )
+        audio_stream.start()
     if note_mode:
         hud_mode = "note"
         icon = "✎"
@@ -1419,18 +996,7 @@ def _show_recording_hud():
     print(f"{icon} Recording…", flush=True)
 
 
-def _timeout_for_duration(duration_sec):
-    """Scale request timeout with audio length — longer audio takes longer to process."""
-    if duration_sec >= 60:
-        return 8.0
-    if duration_sec >= 30:
-        return 7.0
-    if duration_sec >= 20:
-        return 6.0
-    return 5.0
-
-
-def _encode_and_transcribe(audio, timeout=5.0):
+def _encode_and_transcribe(audio):
     """Encode mono float32 audio → OGG/Opus → Whisper. Returns text or None."""
     peak = np.max(np.abs(audio))
     if peak > 0:
@@ -1451,7 +1017,7 @@ def _encode_and_transcribe(audio, timeout=5.0):
     buf.seek(0)
 
     try:
-        result = client.with_options(timeout=timeout, max_retries=0).audio.transcriptions.create(
+        result = client.audio.transcriptions.create(
             model=MODEL,
             file=buf,
             language=LANGUAGE,
@@ -1460,7 +1026,7 @@ def _encode_and_transcribe(audio, timeout=5.0):
         )
         return result.text.strip()
     except openai.APITimeoutError:
-        print(f"! Transcription timed out ({timeout}s)", flush=True)
+        print("! Transcription timed out", flush=True)
         return None
     except openai.APIConnectionError as e:
         print(f"! Connection error: {e}", flush=True)
@@ -1473,129 +1039,23 @@ def _encode_and_transcribe(audio, timeout=5.0):
         return None
 
 
-def _transcribe_with_auto_retries(audio, duration_sec, on_progress=None, max_retries=2):
-    """One initial attempt + up to max_retries auto-retries. Returns text or None.
-
-    on_progress(attempt, total_attempts, total_sec_left) is called every second
-    ONLY during retry attempts (attempt > 1). `total_sec_left` counts down the
-    combined retry budget across all retries (not per-cycle), so the user sees a
-    single steady countdown from `max_retries * timeout` down to 1.
-    """
-    timeout = _timeout_for_duration(duration_sec)
-    total_attempts = max_retries + 1
-    total_retry_secs = max_retries * int(timeout)
-    retry_ticks_elapsed = 0
-
-    for attempt in range(1, total_attempts + 1):
-        result = {"text": None, "done": False}
-
-        def _do():
-            try:
-                result["text"] = _encode_and_transcribe(audio, timeout=timeout)
-            finally:
-                result["done"] = True
-
-        worker = threading.Thread(target=_do, daemon=True)
-        worker.start()
-
-        sec_left_in_attempt = int(timeout)
-        while not result["done"] and sec_left_in_attempt > 0:
-            if on_progress is not None and attempt > 1:
-                total_remaining = total_retry_secs - retry_ticks_elapsed
-                on_progress(attempt, total_attempts, total_remaining)
-                retry_ticks_elapsed += 1
-            time.sleep(1)
-            sec_left_in_attempt -= 1
-
-        worker.join(timeout=timeout + 2)
-
-        if result["text"] is not None:
-            return result["text"]
-
-    return None
-
-
-_FOREIGN_SCRIPT_RE = re.compile(
-    "["
-    "　-鿿"      # CJK symbols, punctuation, hiragana, katakana, unified ideographs
-    "가-힯"      # Hangul syllables
-    "豈-﫿"      # CJK compatibility ideographs
-    "＀-￯"      # halfwidth/fullwidth forms
-    "֐-ۿ"      # Hebrew, Arabic
-    "܀-޿"      # Syriac
-    "ऀ-෿"      # Indic scripts
-    "฀-࿿"      # Thai, Lao, Tibetan
-    "က-႟"      # Myanmar
-    "Ⴀ-ჿ"      # Georgian
-    "ሀ-፿"      # Ethiopic
-    "]"
-)
-
-
 def _is_hallucination(text):
     text_check = text.lower().strip().rstrip(".!?,;:…").strip()
-    if text_check in WHISPER_HALLUCINATIONS or text.lower().strip() in WHISPER_HALLUCINATIONS:
-        return True
-    # Only Russian + Latin + digits/punct allowed; anything else = Whisper leak into another language.
-    if _FOREIGN_SCRIPT_RE.search(text):
-        return True
-    return False
-
-
-def _save_note_audio_background(audio, duration_sec):
-    """Persist recorded audio as compressed Opus for later recall/verification.
-
-    Writes to ~/life/state/govori-audio/YYYY-MM-DD/HHMMSS_Nsec.opus.
-    Silently no-op on any error — audio persistence is best-effort and must not
-    affect note-save success.
-
-    Sizing: libopus @ 24kbps voice ≈ 3 KB/sec. A 10s note → ~30 KB. Month of
-    heavy use → <30 MB. Retention is the user's problem (no auto-cleanup yet).
-    """
-    try:
-        import datetime as _dt
-        now = _dt.datetime.now()
-        date_dir = Path.home() / "life" / "state" / "govori-audio" / now.strftime("%Y-%m-%d")
-        date_dir.mkdir(parents=True, exist_ok=True)
-        stem = now.strftime("%H%M%S") + f"_{int(round(duration_sec))}s"
-        out_path = date_dir / f"{stem}.opus"
-
-        # Normalize + encode mirroring _transcribe_http_call's approach.
-        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
-        audio_n = (audio / peak * 0.9) if peak > 0 else audio
-        audio_int16 = (audio_n * 32767).astype(np.int16)
-
-        container = av.open(str(out_path), mode="w", format="ogg")
-        stream = container.add_stream("libopus", rate=SAMPLE_RATE, layout="mono")
-        # Voice-optimized: 32 kbps is comfortable for speech recall + spot-check
-        # of whisper errors. At 16kHz mono this is ~4 KB/sec → 14 MB/hour.
-        stream.bit_rate = 32_000
-        frame = av.AudioFrame.from_ndarray(audio_int16.reshape(1, -1), format="s16", layout="mono")
-        frame.rate = SAMPLE_RATE
-        for packet in stream.encode(frame):
-            container.mux(packet)
-        for packet in stream.encode(None):
-            container.mux(packet)
-        container.close()
-        size_kb = out_path.stat().st_size / 1024
-        print(f"✓ audio saved: {out_path.name} ({size_kb:.1f} KB)", flush=True)
-    except Exception as e:
-        print(f"! audio-save failed (non-fatal): {e}", flush=True)
+    return (
+        text_check in WHISPER_HALLUCINATIONS
+        or text.lower().strip() in WHISPER_HALLUCINATIONS
+    )
 
 
 def _note_pipeline_background(audio, duration_sec):
     """Full note pipeline: transcribe → filter → classify → save. No HUD updates."""
     global _retry_buffer, _retry_count
-    threading.Thread(
-        target=lambda a=audio, d=duration_sec: _save_note_audio_background(a, d),
-        daemon=True,
-    ).start()
-    text = _transcribe_with_auto_retries(audio, duration_sec)
+    text = _encode_and_transcribe(audio)
     if text is None:
         with _state_lock:
             _retry_buffer = [audio]  # already concatenated, wrap in list for retry compat
             _retry_count = 0
-        set_hud(True, mode="error_retryable", tooltip=_tooltip("api_network"))
+        set_hud(True, mode="error_retryable", tooltip=_tooltip("api_timeout"))
         return
     if _is_hallucination(text):
         print(f"(hallucination filtered: {text})", flush=True)
@@ -1621,7 +1081,6 @@ def stop_and_transcribe():
             return
 
     total_samples = sum(len(c) for c in audio_chunks)
-    print(f"[debug] chunks={len(audio_chunks)} total_samples={total_samples} dur={total_samples/SAMPLE_RATE:.2f}s", flush=True)
     if total_samples / SAMPLE_RATE < 0.5:
         set_hud(False)
         print("(too short)", flush=True)
@@ -1662,12 +1121,7 @@ def stop_and_transcribe():
     set_hud(True, "transcribing")
     print("■ Transcribing…", flush=True)
 
-    duration = total_samples / SAMPLE_RATE
-
-    def _show_progress(n, total, sec_left):
-        set_hud(True, mode="countdown", count=sec_left)
-
-    text = _transcribe_with_auto_retries(audio, duration, on_progress=_show_progress)
+    text = _encode_and_transcribe(audio)
     transcribing = False
 
     if text is None:
@@ -1676,7 +1130,7 @@ def stop_and_transcribe():
             with _state_lock:
                 _retry_buffer = list(audio_chunks)  # copy for retry safety (Pitfall 4)
                 _retry_count = 0
-            set_hud(True, mode="error_retryable", tooltip=_tooltip("api_network"))
+            set_hud(True, mode="error_retryable", tooltip=_tooltip("api_timeout"))
         else:
             set_hud(False)
         return
@@ -1704,7 +1158,7 @@ def stop_and_transcribe():
         print("(empty)", flush=True)
 
 
-def cancel_recording(skip_hud=False, quiet=False):
+def cancel_recording():
     global recording, transcribing, audio_stream, audio_chunks, cancelled, predict_mode, note_mode
     with _state_lock:
         cancelled    = True
@@ -1717,11 +1171,8 @@ def cancel_recording(skip_hud=False, quiet=False):
             audio_stream.close()
             audio_stream = None
         audio_chunks = []
-    if not skip_hud:
-        set_hud(False)
-    if not quiet:
-        print("(cancelled)", flush=True)
-
+    set_hud(False)
+    print("(cancelled)", flush=True)
 
 # ── Paste / Enter ─────────────────────────────────────────────────────────────
 def paste_text(text):
@@ -1804,90 +1255,6 @@ def _validate_meta(data):
     }
 
 
-def segment_by_context(text, contexts):
-    """Разбить текст заметки на секции '## <context>' когда затронуто
-    несколько проектов. Наследует временные/приоритетные маркеры («завтра»,
-    «срочно», «до пятницы») из общего начала ко всем секциям — они относятся
-    ко всем упомянутым проектам пока явно не переопределены.
-
-    Fallback: если contexts пуст или содержит 1 элемент — возвращает текст
-    без изменений. Если Haiku недоступен или ответ невалидный — возвращает
-    оригинал. Никогда не блокирует pipeline.
-    """
-    if not text or len(contexts) < 2:
-        return text
-    if NOTES_CFG is None:
-        return text
-    client = _get_anthropic_client()
-    if client is None:
-        return text
-
-    contexts_desc = NOTES_CFG["contexts_desc"]
-    contexts_list = ", ".join(contexts)
-
-    system = f"""Ты структурируешь многотематическую голосовую заметку.
-
-На входе — один связный текст заметки, в котором пользователь последовательно
-говорит о нескольких проектах. Твоя задача: разбить текст на секции
-по проектам, НЕ теряя информацию.
-
-КОНТЕКСТЫ ПОЛЬЗОВАТЕЛЯ:
-{contexts_desc}
-
-В ЭТОЙ ЗАМЕТКЕ ЗАТРОНУТЫ: {contexts_list}
-
-ПРАВИЛА:
-1. Для каждого контекста из списка создай секцию с заголовком `## <context_key>`
-   (ровно тот ключ что в списке выше — marquiz, persona, skvo и т.д., не русские названия).
-2. В каждую секцию помести фрагмент текста, относящийся к этому контексту.
-3. Секции располагай в том порядке, как контексты упоминались в тексте.
-4. НЕ меняй слова пользователя. НЕ переписывай. НЕ сокращай. НЕ добавляй.
-5. НАСЛЕДОВАНИЕ временных/приоритетных маркеров:
-   - Если в начале заметки есть маркер типа «завтра», «срочно», «до пятницы»,
-     «в первую очередь» и т.п., и он явно относится к нескольким упомянутым
-     проектам — повтори этот маркер в каждой релевантной секции.
-   - Если маркер сказан ЯВНО про один конкретный пункт (например, «...проверить
-     их завтра» — только про документы Наташи) — оставляй его ТОЛЬКО в той секции.
-   - Если не уверен к скольки проектам относится маркер — оставь только там
-     где он изначально был сказан.
-6. Разговорные связки ("А ещё", "И ещё нужно", "Так ещё") оставляй в тех
-   секциях где они изначально были — не теряй интонацию переключения.
-7. Если какой-то контекст из списка фактически не упоминается в тексте —
-   НЕ создавай для него секцию (лучше вернуть меньше секций чем пустые).
-
-Верни ТОЛЬКО текст с секциями, без пояснений, кавычек, markdown-обёрток.
-Не добавляй преамбулу перед первой секцией `##` — заголовок должен быть
-первой строкой."""
-
-    try:
-        resp = client.messages.create(
-            model=NOTES_CFG["classifier_model"],
-            max_tokens=max(800, len(text) * 3),
-            temperature=0,
-            system=system,
-            messages=[{"role": "user", "content": text}],
-        )
-        segmented = resp.content[0].text.strip()
-        if segmented.startswith("```"):
-            segmented = re.sub(r"^```(?:\w+)?\s*", "", segmented)
-            segmented = re.sub(r"\s*```\s*$", "", segmented)
-        # Валидация: должно начинаться с `## `
-        if not segmented.startswith("## "):
-            print(f"  [segment] skipped — no section headers in output", flush=True)
-            return text
-        # Валидация длины: разбивка может немного увеличить (заголовки +
-        # возможное дублирование inheritance markers), но не в разы.
-        if len(segmented) < len(text) * 0.7 or len(segmented) > len(text) * 2.5:
-            print(f"  [segment] skipped — length delta suspicious "
-                  f"(orig {len(text)}, segmented {len(segmented)})", flush=True)
-            return text
-        print(f"  [segment] split into {segmented.count('## ')} section(s)", flush=True)
-        return segmented
-    except Exception as e:
-        print(f"  [segment] failed (non-fatal): {e}", flush=True)
-        return text
-
-
 def classify_note(text):
     """Classify transcribed note via Claude. Returns validated meta dict."""
     if not NOTES_CFG:
@@ -1912,13 +1279,8 @@ User's contexts (use these exact keys):
 {NOTES_CFG['contexts_desc']}
 {stuck_block}
 Given a transcribed note, return STRICT JSON ONLY with these fields:
-- title: 2-5 word slug in latin kebab-case (e.g. "work-deploy-issue"). When
-  the note spans multiple contexts, pick a title that reflects the PRIMARY
-  (first-mentioned) context, not a generic summary.
-- contexts: array of ALL applicable context keys. Return MULTIPLE entries
-  when the note clearly mentions distinct projects. Better to over-tag
-  than under-tag: if the user talks about 3 projects, return all 3 keys.
-  Order: first-mentioned first (this becomes the "primary" context).
+- title: 2-5 word slug in latin kebab-case (e.g. "work-deploy-issue")
+- contexts: array — usually ONE element. Multiple only if the note explicitly mixes projects.
 - type: one of [idea, commitment, observation, todo, decision, question, other]
 - urgency: one of [low, medium, high]
 - tags: 1-4 short lowercase tags (free-form)
@@ -2165,11 +1527,6 @@ def save_or_merge_note(text, duration_sec):
         return
     try:
         meta = classify_note(text)
-        # Multi-context split: if Haiku classifier returned multiple contexts,
-        # ask Haiku to structure the text into '## <context>' sections with
-        # inheritance of temporal markers across sections.
-        if len(meta.get("contexts", [])) > 1:
-            text = segment_by_context(text, meta["contexts"])
         candidates = _find_merge_candidates(meta["contexts"])
         decision = _decide_merge(text, candidates)
         decision = _confirm_merge(decision, text)
@@ -2246,64 +1603,46 @@ def _save_note_with_meta(text, duration_sec, meta):
 _predict_controller = None
 
 
-def generate_rephrasings(text):
-    """Generate 3 alternative phrasings of the given text, preserving meaning."""
+def generate_continuations(text):
+    """GPT-4o-mini generates 3 text continuations."""
     try:
         resp = client.chat.completions.create(
-            model=CONFIG.get("predict_model", "llama-3.3-70b-versatile"),
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You are a rephrasing assistant. Given a piece of text, "
-                        "produce 3 distinct alternative phrasings that preserve "
-                        "the original meaning but vary in wording, tone, or "
-                        "structure. Keep roughly the same length and the SAME "
-                        "language as the input. Do not add or remove information. "
-                        "Return JSON: {\"rephrasings\": [\"...\", \"...\", \"...\"]}"
+                        "You are a text autocomplete assistant. "
+                        "Given the beginning of a text, suggest 3 natural continuations. "
+                        "Each continuation should be 5-20 words, completing the thought. "
+                        "Keep the same language as input. "
+                        "Return JSON: {\"continuations\": [\"...\", \"...\", \"...\"]}"
                     ),
                 },
                 {"role": "user", "content": text},
             ],
             response_format={"type": "json_object"},
-            max_tokens=400,
+            max_tokens=200,
             temperature=0.7,
         )
         data = json.loads(resp.choices[0].message.content)
-        items = data.get("rephrasings", [])
+        items = data.get("continuations", [])
         if isinstance(items, list) and len(items) >= 1:
             return [str(v) for v in items[:3]]
     except Exception as e:
-        print(f"Rephrase error: {e}", flush=True)
+        print(f"Predict error: {e}", flush=True)
     return []
 
 
 class PredictController(AppKit.NSObject):
-    _rephrasings = []
-    _pasted_len = 0
+    _continuations = []
 
-    def pickRephrasing_(self, sender):
+    def pickContinuation_(self, sender):
         idx = sender.tag()
-        if 0 <= idx < len(self._rephrasings):
-            text = self._rephrasings[idx]
-            n = self._pasted_len
-            print(f"✦ rephrase: {text}", flush=True)
-            def _replace():
-                _delete_chars(n)
-                paste_text(text + " ")
-            threading.Thread(target=_replace, daemon=True).start()
-
-
-def _delete_chars(n):
-    """Send n Backspace key events to erase the previously-pasted text."""
-    if n <= 0:
-        return
-    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
-    for _ in range(n):
-        ev = Quartz.CGEventCreateKeyboardEvent(src, 0x33, True)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
-        ev = Quartz.CGEventCreateKeyboardEvent(src, 0x33, False)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        if 0 <= idx < len(self._continuations):
+            text = self._continuations[idx]
+            print(f"✦ predict: {text}", flush=True)
+            threading.Thread(target=lambda t=text: paste_text(t), daemon=True).start()
 
 
 def setup_predict():
@@ -2312,20 +1651,16 @@ def setup_predict():
 
 
 def show_predict_menu(original_text):
-    """Generate rephrasings and show NSMenu. The original text has already
-    been pasted by stop_and_transcribe; if the user picks a rephrasing we
-    delete those chars and paste the replacement. On dismiss we leave the
-    original in place."""
+    """Generate continuations and show NSMenu."""
     set_hud(True, "predict")
-    rephrasings = generate_rephrasings(original_text)
+    continuations = generate_continuations(original_text)
     set_hud(False)
 
-    if not rephrasings:
-        print("(no rephrasings — keeping original)", flush=True)
+    if not continuations:
+        print("(no predictions)", flush=True)
         return
 
-    _predict_controller._rephrasings = rephrasings
-    _predict_controller._pasted_len = len(original_text) + 1  # +1 for trailing space
+    _predict_controller._continuations = continuations
 
     menu = AppKit.NSMenu.alloc().init()
     menu.setAutoenablesItems_(False)
@@ -2334,9 +1669,9 @@ def show_predict_menu(original_text):
         AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameVibrantDark)
     )
 
-    for i, reph in enumerate(rephrasings):
+    for i, cont in enumerate(continuations):
         item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            reph, "pickRephrasing:", str(i + 1)
+            cont, "pickContinuation:", str(i + 1)
         )
         item.setTarget_(_predict_controller)
         item.setEnabled_(True)
@@ -2359,20 +1694,11 @@ _option_held = False
 
 
 def cg_event_callback(proxy, event_type, event, refcon):
-    global prev_fn_down, _fn_press_time, _shift_held, _option_held, note_mode, predict_mode
-    global recording, cancelled, audio_chunks, _retry_count, auto_send
-
-    # Mouse routing: HUD is an NSPanel that can't receive native mouse events;
-    # we dispatch via CGEventTap so click-to-retry and pointer cursor still work.
-    if event_type in (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp):
-        _route_mouse_to_hud(event_type, event)
-        return event
-
+    global prev_fn_down, _fn_press_time, _shift_held, _option_held, note_mode
     keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
     flags_now = Quartz.CGEventGetFlags(event)
 
     prev_shift_held = _shift_held
-    prev_option_held = _option_held
     _shift_held  = bool(flags_now & Quartz.kCGEventFlagMaskShift)
     _option_held = bool(flags_now & Quartz.kCGEventFlagMaskAlternate)
 
@@ -2380,18 +1706,10 @@ def cg_event_callback(proxy, event_type, event, refcon):
     if recording and _shift_held and not prev_shift_held:
         if NOTES_CFG:
             note_mode = not note_mode
-            predict_mode = False
             set_hud(True, "note" if note_mode else "recording")
             print(f"[toggle] note_mode={'on' if note_mode else 'off'}", flush=True)
         else:
             print("notes plugin not installed — shift+fn disabled", flush=True)
-
-    # Option TAP during recording → toggle predict mode
-    if recording and _option_held and not prev_option_held:
-        predict_mode = not predict_mode
-        note_mode = False
-        set_hud(True, "predict" if predict_mode else "recording")
-        print(f"[toggle] predict_mode={'on' if predict_mode else 'off'}", flush=True)
 
     # Esc → cancel
     if event_type == Quartz.kCGEventKeyDown and keycode == 53 and (recording or transcribing):
@@ -2400,6 +1718,7 @@ def cg_event_callback(proxy, event_type, event, refcon):
 
     # Enter during recording → toggle auto-send + undo the inserted Enter
     if keycode in (36, 76) and recording and event_type == Quartz.kCGEventKeyDown:
+        global auto_send
         auto_send = not auto_send
         print(f"auto_send={'on' if auto_send else 'off'}", flush=True)
         def _undo_enter():
@@ -2422,47 +1741,30 @@ def cg_event_callback(proxy, event_type, event, refcon):
 
     if is_down and not prev_fn_down:
         _fn_press_time = time.time()
-        if _shift_held and NOTES_CFG:
-            note_mode    = True
-            predict_mode = False
-        elif _option_held:
-            predict_mode = True
-            note_mode    = False
-        else:
-            predict_mode = False
-            note_mode    = False
-        # Set recording state synchronously so fn-up always observes it.
-        # Only the blocking mic initialization is offloaded to a thread.
-        with _state_lock:
-            if recording:
-                should_start_mic = False
+        def delayed_start():
+            time.sleep(0.25)
+            if not prev_fn_down:
+                return
+            global predict_mode, note_mode
+            if _shift_held and NOTES_CFG:
+                note_mode    = True
+                predict_mode = False
+            elif _option_held:
+                predict_mode = True
+                note_mode    = False
             else:
-                recording    = True
-                cancelled    = False
-                auto_send    = False
-                audio_chunks = []
-                _retry_count = 0
-                should_start_mic = True
-        print(
-            f"[mode] shift={_shift_held} option={_option_held} "
-            f"→ note={note_mode} predict={predict_mode}",
-            flush=True,
-        )
-        if should_start_mic:
-            threading.Thread(target=_start_mic_stream, daemon=True).start()
-            def _show_hud_delayed():
-                time.sleep(0.20)
-                if recording and not cancelled:
-                    _show_recording_hud()
-            threading.Thread(target=_show_hud_delayed, daemon=True).start()
+                predict_mode = False
+                note_mode    = False
+            print(
+                f"[mode] shift={_shift_held} option={_option_held} "
+                f"→ note={note_mode} predict={predict_mode}",
+                flush=True,
+            )
+            start_recording()
+        threading.Thread(target=delayed_start, daemon=True).start()
     elif not is_down and prev_fn_down:
-        held = time.time() - _fn_press_time
-        if held < 0.20:
-            threading.Thread(
-                target=lambda: cancel_recording(skip_hud=True, quiet=True),
-                daemon=True,
-            ).start()
-        elif recording:
+        elapsed = time.time() - _fn_press_time
+        if elapsed >= 0.25 and recording:
             threading.Thread(target=stop_and_transcribe, daemon=True).start()
 
     prev_fn_down = is_down
@@ -2475,9 +1777,7 @@ def install_monitor():
         Quartz.kCGHeadInsertEventTap,
         Quartz.kCGEventTapOptionListenOnly,
         Quartz.CGEventMaskBit(Quartz.kCGEventFlagsChanged)
-        | Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown)
-        | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDown)
-        | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseUp),
+        | Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown),
         cg_event_callback,
         None,
     )
@@ -2491,40 +1791,6 @@ def install_monitor():
     )
     Quartz.CGEventTapEnable(tap, True)
     print("Hotkey monitor installed.", flush=True)
-    return tap
-
-
-def _tap_health_check(tap):
-    """Poll CGEventTap health every 7s. Daemon thread -- exits with main process."""
-    tap_was_disabled = False
-    while True:
-        time.sleep(7)
-        try:
-            enabled = Quartz.CGEventTapIsEnabled(tap)
-        except Exception:
-            continue  # if tap reference becomes invalid, keep polling
-        if not enabled and not tap_was_disabled:
-            tap_was_disabled = True
-            # Attempt re-enable per D-10
-            try:
-                Quartz.CGEventTapEnable(tap, True)
-            except Exception:
-                pass
-            set_hud(True, mode="error_fatal", tooltip=_tooltip("accessibility_revoked"))
-            print("! Accessibility revoked -- attempting re-enable", flush=True)
-        elif not enabled and tap_was_disabled:
-            # Still disabled -- try re-enable again
-            try:
-                Quartz.CGEventTapEnable(tap, True)
-            except Exception:
-                pass
-        elif enabled and tap_was_disabled:
-            # Recovered! Clear error per D-11
-            tap_was_disabled = False
-            set_hud(False)
-            print("Accessibility restored.", flush=True)
-        # If enabled and was not disabled -- normal state, do nothing
-
 
 # ── Notes CLI (picker + voice amend) ─────────────────────────────────────────
 def _read_index_entries(limit=30):
@@ -2875,74 +2141,6 @@ def cli_notes(args):
     print(f"✓ Saved: {path}")
 
 
-# ── Singleton enforcement ────────────────────────────────────────────────────
-def _find_other_govori_pids():
-    """Return PIDs of other running govori daemons (excluding self)."""
-    my_pid = os.getpid()
-    try:
-        out = subprocess.check_output(
-            ["pgrep", "-f", "govori.py"], text=True
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return []
-    pids = []
-    for line in out.strip().splitlines():
-        try:
-            pid = int(line.strip())
-        except ValueError:
-            continue
-        if pid == my_pid:
-            continue
-        pids.append(pid)
-    return pids
-
-
-def _ensure_singleton():
-    """If another govori daemon is running, offer to kill it and take over."""
-    pids = _find_other_govori_pids()
-    if not pids:
-        return
-    pid_list = ", ".join(str(p) for p in pids)
-    print(f"! Govori is already running (PID {pid_list}).", flush=True)
-    if not sys.stdin.isatty():
-        print("  Another instance is active — refusing to start.", flush=True)
-        sys.exit(1)
-    try:
-        ans = input("  Kill it and take over? [Y/n]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        sys.exit(1)
-    if ans in ("n", "no", "н", "нет"):
-        print("  Aborted.", flush=True)
-        sys.exit(1)
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            continue
-        except PermissionError as e:
-            print(f"  Cannot stop PID {pid}: {e}", flush=True)
-            sys.exit(1)
-    deadline = time.time() + 3.0
-    while time.time() < deadline:
-        if not _find_other_govori_pids():
-            break
-        time.sleep(0.1)
-    remaining = _find_other_govori_pids()
-    if remaining:
-        for pid in remaining:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                continue
-        time.sleep(0.3)
-        remaining = _find_other_govori_pids()
-    if remaining:
-        print(f"  Failed to stop PID(s) {remaining}. Aborting.", flush=True)
-        sys.exit(1)
-    print("  Replaced previous instance.", flush=True)
-
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     if "_NOTES_CLI_ARGS" in globals():
@@ -2959,7 +2157,6 @@ if __name__ == "__main__":
         print(f"→ {text[:120]}{'…' if len(text) > 120 else ''}", flush=True)
         save_or_merge_note(text, duration_sec=0)
         sys.exit(0)
-    _ensure_singleton()
     print(f"Govori started. Model: {MODEL}. Hold fn to record.", flush=True)
 
     app = AppKit.NSApplication.sharedApplication()
@@ -2967,14 +2164,7 @@ if __name__ == "__main__":
 
     setup_hud()
     setup_predict()
-    tap = install_monitor()
-    threading.Thread(target=_tap_health_check, args=(tap,), daemon=True).start()
-
-    # Microphone startup check (non-blocking per D-12, D-13)
-    try:
-        sd.query_devices(kind='input')
-    except sd.PortAudioError:
-        print("! No microphone detected. Plug one in before recording.", flush=True)
+    install_monitor()
 
     signal.signal(signal.SIGINT, lambda *_: os._exit(0))
     run_loop = AppKit.NSRunLoop.mainRunLoop()

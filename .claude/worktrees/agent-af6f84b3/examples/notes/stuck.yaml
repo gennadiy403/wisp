@@ -1,0 +1,8 @@
+# Optional: define ongoing tasks/projects that you want notes linked to.
+# When you dictate a note that mentions one of these, it gets tagged automatically.
+#
+# - key: migration
+#   description: Database migration from Postgres to CockroachDB
+#
+# - key: hiring
+#   description: Hiring a senior backend engineer
