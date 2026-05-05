@@ -905,6 +905,7 @@ _retry_count = 0          # current retry attempt count
 _retry_in_progress = False
 _retry_mode_snapshot = None
 _hud_error_mode = None    # current error mode: "error_retryable", "error_fatal", or None
+_health_monitor_owns_hud = False
 
 # Sentinel for non-retryable API errors (4xx other than 408/429).
 # Distinct from None which signals transient failures eligible for retry.
@@ -2566,6 +2567,7 @@ def install_monitor():
 
 def _tap_health_check(tap):
     """Poll CGEventTap health every 7s. Daemon thread -- exits with main process."""
+    global _health_monitor_owns_hud
     tap_was_disabled = False
     while True:
         time.sleep(7)
@@ -2580,7 +2582,9 @@ def _tap_health_check(tap):
                 Quartz.CGEventTapEnable(tap, True)
             except Exception:
                 pass
+            cancel_recording(skip_hud=True, quiet=True)
             set_hud(True, mode="error_fatal", tooltip=_tooltip("accessibility_revoked"))
+            _health_monitor_owns_hud = True
             print("! Accessibility revoked -- attempting re-enable", flush=True)
         elif not enabled and tap_was_disabled:
             # Still disabled -- try re-enable again
@@ -2591,7 +2595,9 @@ def _tap_health_check(tap):
         elif enabled and tap_was_disabled:
             # Recovered! Clear error per D-11
             tap_was_disabled = False
-            set_hud(False)
+            if _health_monitor_owns_hud and _hud_error_mode == "error_fatal":
+                set_hud(False)
+            _health_monitor_owns_hud = False
             print("Accessibility restored.", flush=True)
         # If enabled and was not disabled -- normal state, do nothing
 
