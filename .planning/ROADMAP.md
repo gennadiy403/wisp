@@ -13,6 +13,7 @@ Govori's feature set is complete and competitive. This milestone hardens the exi
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [ ] **Phase 1: Security & Safety** - Fix ship-blocking vulnerabilities and add safety guards for system-level APIs
+- [ ] **Phase 1.1: Security Hardening (Codex Review)** *(INSERTED 2026-05-05)* - Fix 9 issues found by cross-AI review of phase 01 implementation
 - [ ] **Phase 2: Architecture & Reliability** - Extract modules from monolith, replace globals with explicit state, add logging and graceful shutdown
 - [ ] **Phase 3: Packaging & Distribution** - Package for PyPI, add smoke tests, publish with documentation
 
@@ -33,6 +34,26 @@ Plans:
 - [x] 01-01-PLAN.md -- Shell injection fix + privacy notice in onboarding
 - [x] 01-02-PLAN.md -- HUD error infrastructure + API timeout with retry
 - [x] 01-03-PLAN.md -- CGEventTap health monitoring + microphone error handling
+
+### Phase 1.1: Security Hardening (Codex Review) *(INSERTED 2026-05-05)*
+**Goal**: Закрыть 9 issue, найденных независимым cross-AI ревью (Codex gpt-5.5/high) реализации фазы 01-security-safety. SEC-01 признан clean; SEC-02..04 + REL-01 имели gaps между заявленными мерами и фактической реализацией.
+**Depends on**: Phase 1
+**Requirements**: SEC-02, SEC-03, SEC-04, REL-01 (re-verification)
+**Source**: `.planning/phases/01-security-safety/01-CODEX-REVIEW.md`
+**Success Criteria** (what must be TRUE):
+  1. OpenAI client timeout = 30s (не хардкод 5s) и permanent API errors не идут в retry
+  2. HUD click retry single-flight через lock; retry success диспатчится через оригинальный mode (note/predict/auto-send), не всегда paste
+  3. Health-monitor при revoked Accessibility отменяет recording + закрывает audio_stream до показа HUD; recovery проверяет ownership перед скрытием HUD
+  4. Privacy notice (en+ru) честно описывает note-mode persistence + predict/rephrase API path
+  5. stop_and_transcribe не падает на race-empty audio_chunks; CLI voice amend ловит PortAudioError
+  6. Повторный Codex security-review с теми же критериями: 0 находок остаются open
+**Plans:** 5 plans
+Plans:
+- [ ] 01.1-01-PLAN.md -- API timeout 30s + permanent error classification (Claude)
+- [ ] 01.1-02-PLAN.md -- Retry single-flight + mode-aware dispatch (Codex via codex exec)
+- [ ] 01.1-03-PLAN.md -- Health-monitor cancel recording + ownership tracking (Codex via codex exec)
+- [ ] 01.1-04-PLAN.md -- Privacy notice corrections en+ru (Claude)
+- [ ] 01.1-05-PLAN.md -- Empty audio_chunks guard + CLI mic error handling (Claude)
 
 ### Phase 2: Architecture & Reliability
 **Goal**: Govori runs as a proper Python package with isolated modules, explicit state, structured logging, and clean shutdown
