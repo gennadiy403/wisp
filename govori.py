@@ -868,9 +868,9 @@ if not _api_key:
     sys.exit(1)
 _base_url = CONFIG.get("base_url")
 client = (
-    OpenAI(api_key=_api_key, base_url=_base_url, timeout=5.0, max_retries=0)
+    OpenAI(api_key=_api_key, base_url=_base_url, timeout=30.0, max_retries=0)
     if _base_url
-    else OpenAI(api_key=_api_key, timeout=5.0, max_retries=0)
+    else OpenAI(api_key=_api_key, timeout=30.0, max_retries=0)
 )
 
 # Anthropic client — lazy, only if note mode is used
@@ -903,6 +903,10 @@ note_mode    = False
 _retry_buffer = None      # audio chunks saved for retry
 _retry_count = 0          # current retry attempt count
 _hud_error_mode = None    # current error mode: "error_retryable", "error_fatal", or None
+
+# Sentinel for non-retryable API errors (4xx other than 408/429).
+# Distinct from None which signals transient failures eligible for retry.
+PERMANENT_API_ERROR = object()
 
 if "_NOTES_CLI_ARGS" not in globals() and "_NOTE_CLI_TEXT" not in globals():
     print("Govori ready.", flush=True)
@@ -1245,6 +1249,12 @@ def _retry_transcription():
     audio = np.concatenate(buf_copy, axis=0).flatten()
     duration = len(audio) / SAMPLE_RATE
     text = _encode_and_transcribe(audio, timeout=_timeout_for_duration(duration))
+    if text is PERMANENT_API_ERROR:
+        # Permanent error on retry — escalate to fatal, drop buffer
+        _retry_buffer = None
+        _retry_count = 0
+        set_hud(True, mode="error_fatal", tooltip=_tooltip("api_network"))
+        return
     if text is None:
         # Still failing -- show retryable error again
         set_hud(True, mode="error_retryable", tooltip=_tooltip("api_network"))
@@ -1420,18 +1430,21 @@ def _show_recording_hud():
 
 
 def _timeout_for_duration(duration_sec):
-    """Scale request timeout with audio length — longer audio takes longer to process."""
+    """Scale request timeout with audio length — longer audio takes longer to process.
+    Floor is 30s per SEC-03 (was 5-8s before; phase 01.1-01)."""
     if duration_sec >= 60:
-        return 8.0
+        return 60.0
     if duration_sec >= 30:
-        return 7.0
+        return 45.0
     if duration_sec >= 20:
-        return 6.0
-    return 5.0
+        return 35.0
+    return 30.0
 
 
-def _encode_and_transcribe(audio, timeout=5.0):
-    """Encode mono float32 audio → OGG/Opus → Whisper. Returns text or None."""
+def _encode_and_transcribe(audio, timeout=30.0):
+    """Encode mono float32 audio → OGG/Opus → Whisper.
+    Returns: text (str), None (transient failure — caller may retry),
+    or PERMANENT_API_ERROR sentinel (4xx other than 408/429 — do not retry)."""
     peak = np.max(np.abs(audio))
     if peak > 0:
         audio = audio / peak * 0.9
@@ -1466,11 +1479,13 @@ def _encode_and_transcribe(audio, timeout=5.0):
         print(f"! Connection error: {e}", flush=True)
         return None
     except openai.APIStatusError as e:
-        if e.status_code >= 500:
+        # 408 Request Timeout, 429 Too Many Requests, 5xx → transient (retry OK).
+        # Other 4xx (400 bad request, 401 auth, 403 forbidden, 404, 422 validation) → permanent.
+        if e.status_code >= 500 or e.status_code in (408, 429):
             print(f"! Server error ({e.status_code})", flush=True)
-        else:
-            print(f"! API error ({e.status_code}): {e}", flush=True)
-        return None
+            return None
+        print(f"! API error ({e.status_code}): {e} (permanent — won't retry)", flush=True)
+        return PERMANENT_API_ERROR
 
 
 def _transcribe_with_auto_retries(audio, duration_sec, on_progress=None, max_retries=2):
@@ -1509,6 +1524,8 @@ def _transcribe_with_auto_retries(audio, duration_sec, on_progress=None, max_ret
 
         worker.join(timeout=timeout + 2)
 
+        if result["text"] is PERMANENT_API_ERROR:
+            return PERMANENT_API_ERROR
         if result["text"] is not None:
             return result["text"]
 
@@ -1591,6 +1608,9 @@ def _note_pipeline_background(audio, duration_sec):
         daemon=True,
     ).start()
     text = _transcribe_with_auto_retries(audio, duration_sec)
+    if text is PERMANENT_API_ERROR:
+        set_hud(True, mode="error_fatal", tooltip=_tooltip("api_network"))
+        return
     if text is None:
         with _state_lock:
             _retry_buffer = [audio]  # already concatenated, wrap in list for retry compat
@@ -1669,6 +1689,13 @@ def stop_and_transcribe():
 
     text = _transcribe_with_auto_retries(audio, duration, on_progress=_show_progress)
     transcribing = False
+
+    if text is PERMANENT_API_ERROR:
+        if not cancelled:
+            set_hud(True, mode="error_fatal", tooltip=_tooltip("api_network"))
+        else:
+            set_hud(False)
+        return
 
     if text is None:
         if not cancelled:
@@ -2830,7 +2857,7 @@ def cli_notes(args):
 
     print("■ Transcribing…", flush=True)
     instruction = _encode_and_transcribe(audio)
-    if not instruction:
+    if instruction is PERMANENT_API_ERROR or not instruction:
         print("(transcription failed)")
         return
     print(f"→ {instruction}")
