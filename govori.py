@@ -902,6 +902,8 @@ predict_mode = False
 note_mode    = False
 _retry_buffer = None      # audio chunks saved for retry
 _retry_count = 0          # current retry attempt count
+_retry_in_progress = False
+_retry_mode_snapshot = None
 _hud_error_mode = None    # current error mode: "error_retryable", "error_fatal", or None
 
 # Sentinel for non-retryable API errors (4xx other than 408/429).
@@ -1148,16 +1150,27 @@ def _hide_tooltip():
 
 # ── HUD click + cursor routing ───────────────────────────────────────────────
 def _hud_click_action():
-    global _retry_count
+    global _retry_count, _retry_in_progress
     if _hud_error_mode != "error_retryable":
         return
-    if _retry_buffer is None:
-        return
-    _retry_count += 1
-    if _retry_count > 3:
+    with _state_lock:
+        if _retry_buffer is None or _retry_in_progress:
+            retry_exhausted = False
+            retry_attempt = None
+        elif _retry_count >= 3:
+            retry_exhausted = True
+            retry_attempt = None
+        else:
+            _retry_count += 1
+            _retry_in_progress = True
+            retry_exhausted = False
+            retry_attempt = _retry_count
+    if retry_exhausted:
         set_hud(True, mode="error_fatal", tooltip=_tooltip("retry_exhausted"))
         return
-    set_hud(True, mode="transcribing", tooltip=_tooltip("retry_attempt", n=_retry_count, total=3))
+    if retry_attempt is None:
+        return
+    set_hud(True, mode="transcribing", tooltip=_tooltip("retry_attempt", n=retry_attempt, total=3))
     threading.Thread(target=_retry_transcription, daemon=True).start()
 
 
@@ -1241,33 +1254,52 @@ def _route_mouse_to_hud(event_type, event):
 
 def _retry_transcription():
     """Re-transcribe using _retry_buffer. Runs in daemon thread after user click."""
-    global _retry_buffer, _retry_count
-    buf_copy = _retry_buffer  # local ref -- safe from race
-    if buf_copy is None:
-        return
-    # Replicate the encoding step from stop_and_transcribe
-    audio = np.concatenate(buf_copy, axis=0).flatten()
-    duration = len(audio) / SAMPLE_RATE
-    text = _encode_and_transcribe(audio, timeout=_timeout_for_duration(duration))
-    if text is PERMANENT_API_ERROR:
-        # Permanent error on retry — escalate to fatal, drop buffer
-        _retry_buffer = None
-        _retry_count = 0
-        set_hud(True, mode="error_fatal", tooltip=_tooltip("api_network"))
-        return
-    if text is None:
-        # Still failing -- show retryable error again
-        set_hud(True, mode="error_retryable", tooltip=_tooltip("api_network"))
-        return
-    if not text or text in WHISPER_HALLUCINATIONS or _is_hallucination(text):
-        print("(empty)", flush=True)
+    global _retry_buffer, _retry_count, _retry_in_progress, _retry_mode_snapshot
+    try:
+        with _state_lock:
+            buf_copy = _retry_buffer
+            mode_snapshot = _retry_mode_snapshot or {}
+        if buf_copy is None:
+            return
+        # Replicate the encoding step from stop_and_transcribe
+        audio = np.concatenate(buf_copy, axis=0).flatten()
+        duration = len(audio) / SAMPLE_RATE
+        text = _encode_and_transcribe(audio, timeout=_timeout_for_duration(duration))
+        if text is PERMANENT_API_ERROR:
+            # Permanent error on retry — escalate to fatal, drop buffer
+            with _state_lock:
+                _retry_buffer = None
+                _retry_count = 0
+                _retry_mode_snapshot = None
+            set_hud(True, mode="error_fatal", tooltip=_tooltip("api_network"))
+            return
+        if text is None:
+            # Still failing -- show retryable error again
+            set_hud(True, mode="error_retryable", tooltip=_tooltip("api_network"))
+            return
+        if not text or text in WHISPER_HALLUCINATIONS or _is_hallucination(text):
+            print("(empty)", flush=True)
+            set_hud(False)
+            return
+        with _state_lock:
+            _retry_count = 0
+            _retry_buffer = None
+            _retry_mode_snapshot = None
+        if mode_snapshot.get("note_mode"):
+            save_or_merge_note(text, mode_snapshot.get("duration", duration))
+        else:
+            paste_text(text + " ")
+            if mode_snapshot.get("predict_mode"):
+                AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                    lambda t=text: show_predict_menu(t)
+                )
+            elif mode_snapshot.get("auto_send"):
+                time.sleep(0.3)
+                _press_enter()
         set_hud(False)
-        return
-    _retry_count = 0
-    _retry_buffer = None
-    # Paste the result (same as normal dictation path)
-    paste_text(text + " ")
-    set_hud(False)
+    finally:
+        with _state_lock:
+            _retry_in_progress = False
 
 
 def set_hud(visible, mode="recording", tooltip=None, count=None):
@@ -1602,7 +1634,7 @@ def _save_note_audio_background(audio, duration_sec):
 
 def _note_pipeline_background(audio, duration_sec):
     """Full note pipeline: transcribe → filter → classify → save. No HUD updates."""
-    global _retry_buffer, _retry_count
+    global _retry_buffer, _retry_count, _retry_mode_snapshot
     threading.Thread(
         target=lambda a=audio, d=duration_sec: _save_note_audio_background(a, d),
         daemon=True,
@@ -1615,6 +1647,12 @@ def _note_pipeline_background(audio, duration_sec):
         with _state_lock:
             _retry_buffer = [audio]  # already concatenated, wrap in list for retry compat
             _retry_count = 0
+            _retry_mode_snapshot = {
+                "note_mode": True,
+                "predict_mode": False,
+                "auto_send": False,
+                "duration": duration_sec,
+            }
         set_hud(True, mode="error_retryable", tooltip=_tooltip("api_network"))
         return
     if _is_hallucination(text):
@@ -1628,7 +1666,7 @@ def _note_pipeline_background(audio, duration_sec):
 
 
 def stop_and_transcribe():
-    global recording, audio_stream, transcribing
+    global recording, audio_stream, transcribing, _retry_buffer, _retry_count, _retry_mode_snapshot
     with _state_lock:
         recording = False
         if audio_stream is not None:
@@ -1699,10 +1737,15 @@ def stop_and_transcribe():
 
     if text is None:
         if not cancelled:
-            global _retry_buffer, _retry_count
             with _state_lock:
                 _retry_buffer = list(audio_chunks)  # copy for retry safety (Pitfall 4)
                 _retry_count = 0
+                _retry_mode_snapshot = {
+                    "note_mode": bool(note_mode),
+                    "predict_mode": bool(predict_mode),
+                    "auto_send": bool(auto_send),
+                    "duration": duration,
+                }
             set_hud(True, mode="error_retryable", tooltip=_tooltip("api_network"))
         else:
             set_hud(False)
