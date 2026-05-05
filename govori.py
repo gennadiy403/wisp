@@ -304,11 +304,17 @@ SETUP_STRINGS = {
 
   Govori sends data to cloud APIs for processing:
 
-    \033[1mVoice audio\033[0m  -->  OpenAI Whisper API (speech-to-text)
-    \033[1mNote text\033[0m    -->  Anthropic Claude API (classification)
+    \033[1mVoice audio\033[0m   -->  OpenAI Whisper API (speech-to-text)
+    \033[1mNote text\033[0m     -->  Anthropic Claude API (classification)
+    \033[1mDictated text\033[0m -->  OpenAI Chat Completions (predict/rephrase mode)
+                       \033[2mNote: predict uses your configured base_url
+                       (may be a third-party endpoint like Groq)\033[0m
 
-  \033[2mAudio is not stored after transcription. Notes are processed
-  but not retained by Anthropic. Keys stay local on your machine.\033[0m
+  \033[2mDictation audio is not retained after a successful transcription.
+  Note-mode audio IS saved locally as Opus to
+  ~/life/state/govori-audio/YYYY-MM-DD/HHMMSS_Ns.opus
+  (~14 MB/hour, no automatic deletion). Anthropic does not retain note
+  text per their policy. Keys stay local on your machine.\033[0m
 
 """,
         "step_access": """
@@ -381,11 +387,17 @@ SETUP_STRINGS = {
 
   Govori отправляет данные в облачные API для обработки:
 
-    \033[1mАудио голоса\033[0m  -->  OpenAI Whisper API (распознавание речи)
-    \033[1mТекст заметок\033[0m -->  Anthropic Claude API (классификация)
+    \033[1mАудио голоса\033[0m       -->  OpenAI Whisper API (распознавание речи)
+    \033[1mТекст заметок\033[0m      -->  Anthropic Claude API (классификация)
+    \033[1mНадиктованный текст\033[0m -->  OpenAI Chat Completions (predict / rephrase)
+                            \033[2mИспользует твой настроенный base_url
+                            (может быть сторонним, например Groq)\033[0m
 
-  \033[2mАудио не сохраняется после транскрипции. Заметки обрабатываются,
-  но не хранятся на серверах Anthropic. Ключи остаются на вашем устройстве.\033[0m
+  \033[2mАудио для обычной диктовки не сохраняется после успешной
+  транскрипции. Аудио заметок (note-mode) СОХРАНЯЕТСЯ локально как Opus в
+  ~/life/state/govori-audio/YYYY-MM-DD/HHMMSS_Ns.opus
+  (~14 МБ/час, автоматического удаления нет). Anthropic не хранит текст
+  заметок согласно их политике. Ключи остаются на твоём устройстве.\033[0m
 
 """,
         "step_access": """
