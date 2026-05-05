@@ -1691,14 +1691,20 @@ def stop_and_transcribe():
             set_hud(False)
             return
 
-    total_samples = sum(len(c) for c in audio_chunks)
-    print(f"[debug] chunks={len(audio_chunks)} total_samples={total_samples} dur={total_samples/SAMPLE_RATE:.2f}s", flush=True)
+        # Snapshot chunks under lock — prevents `np.concatenate(audio_chunks, ...)`
+        # crashing with "need at least one array to concatenate" when another
+        # thread (cancel_recording, health-monitor) reassigns audio_chunks=[]
+        # between this point and the concatenate call below.
+        chunks_snapshot = list(audio_chunks)
+
+    total_samples = sum(len(c) for c in chunks_snapshot)
+    print(f"[debug] chunks={len(chunks_snapshot)} total_samples={total_samples} dur={total_samples/SAMPLE_RATE:.2f}s", flush=True)
     if total_samples / SAMPLE_RATE < 0.5:
         set_hud(False)
         print("(too short)", flush=True)
         return
 
-    audio = np.concatenate(audio_chunks, axis=0).flatten()
+    audio = np.concatenate(chunks_snapshot, axis=0).flatten()
 
     rms = np.sqrt(np.mean(audio ** 2))
     if rms < 0.0001:
@@ -2779,14 +2785,23 @@ def _fzf_pick(entries):
 
 
 def _record_until_enter():
-    """Record audio from mic until user presses Enter. Returns numpy array."""
+    """Record audio from mic until user presses Enter. Returns numpy array or None."""
     chunks = []
 
     def cb(indata, frames, time_info, status):
         chunks.append(indata.copy())
 
-    stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=cb)
-    stream.start()
+    try:
+        stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=cb)
+        stream.start()
+    except sd.PortAudioError as e:
+        err_str = str(e).lower()
+        if "permission" in err_str or "denied" in err_str:
+            print("! Microphone access denied — grant in System Settings → Privacy & Security → Microphone", flush=True)
+        else:
+            print(f"! No microphone available ({e})", flush=True)
+        return None
+
     print("\n🎙  Recording... press [Enter] to stop.", flush=True)
     try:
         input()
