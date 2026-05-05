@@ -1678,6 +1678,53 @@ def _note_pipeline_background(audio, duration_sec):
     save_or_merge_note(text, duration_sec)
 
 
+# ── SPIKE: self-corrections cleanup via Haiku ─────────────────────────────────
+# Removes obvious fillers and applies self-corrections triggered by markers
+# like "ой", "вернее", "точнее", "то есть". Strict prompt — no rephrasing.
+# Throwaway/experimental: easy to delete the function + the call site.
+_SELF_CORRECTION_SYSTEM = """You receive a single voice-dictation transcription in Russian or English. Apply ONLY these two operations:
+
+1. SELF-CORRECTIONS: When the speaker corrects themselves with markers like "ой", "вернее", "точнее", "то есть", "i mean", "actually" — keep what comes AFTER the marker, drop what came before in the SAME clause (back to the nearest comma or beginning of sentence). The marker itself is also dropped.
+   Example: "Купи молоко, ой нет, кефир" → "Купи кефир"
+   Example: "Встреча в три, точнее в четыре" → "Встреча в четыре"
+   Example: "I'll come at five, i mean six" → "I'll come at six"
+
+2. EXPLICIT FILLERS: Remove only obvious filler words/phrases: "эээ", "ммм", "ааа", "нуу", "типа", "как бы", "короче говоря", "в общем", "uhh", "umm". Do NOT remove "это", "ну", "как" or other words that may be meaningful.
+
+NEVER:
+- Rephrase, improve grammar, or change word choice except as required above
+- Add or remove punctuation beyond what the corrections require
+- Add commentary, quotes, prefixes, or explanations
+- Change the language
+- Translate
+
+Return ONLY the cleaned text, nothing else. If nothing matches the rules, return the input unchanged byte-for-byte."""
+
+
+def _apply_self_corrections(text):
+    """Lightweight Haiku pass for self-corrections + obvious fillers.
+    Returns cleaned text or the original on any error/timeout/empty result."""
+    if len(text.split()) < 3:
+        return text
+    anthropic_client = _get_anthropic_client()
+    if anthropic_client is None:
+        return text
+    try:
+        resp = anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            temperature=0,
+            system=_SELF_CORRECTION_SYSTEM,
+            messages=[{"role": "user", "content": text}],
+            timeout=2.0,
+        )
+        cleaned = resp.content[0].text.strip()
+        return cleaned if cleaned else text
+    except Exception as e:
+        print(f"(cleanup skipped: {e})", flush=True)
+        return text
+
+
 def stop_and_transcribe():
     global recording, audio_stream, transcribing, _retry_buffer, _retry_count, _retry_mode_snapshot
     with _state_lock:
@@ -1781,6 +1828,11 @@ def stop_and_transcribe():
 
     if text:
         print(f"→ {text}", flush=True)
+        if not predict_mode:
+            cleaned = _apply_self_corrections(text)
+            if cleaned != text:
+                print(f"✎ {cleaned}", flush=True)
+                text = cleaned
         paste_text(text + " ")
         if predict_mode:
             AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
