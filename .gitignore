@@ -39,3 +39,4 @@ dist/
 
 # Claude Code agent worktrees (ephemeral, never commit)
 .claude/worktrees/
+.claude/settings.local.json
