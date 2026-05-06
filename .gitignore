@@ -36,3 +36,6 @@ dist/
 
 # Shortcuts (macOS Shortcuts app export)
 *.shortcut
+
+# Claude Code agent worktrees (ephemeral, never commit)
+.claude/worktrees/
