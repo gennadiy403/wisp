@@ -70,7 +70,10 @@ Plans:
   6. **PERF-01**: `stop_and_transcribe → encode → API → paste` chain is instrumented with `time.perf_counter()` and emits structured latency events to the log; running `./govori --bench-mode` (or similar) prints a final summary of per-stage timing
   7. **REL-05**: When Groq returns 5xx / timeout / connection error, transcribe module automatically retries on OpenAI (whisper-1) if `OPENAI_API_KEY` is present; user-visible log shows which provider answered
   8. Transcribe module reuses a single HTTP client per provider (keep-alive, connection pool) — no new TLS handshake per dictation
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 02-01-PLAN.md -- Architecture extraction: govori/ package + AppState + loguru + signal handling + pydantic config validation (ARCH-01, ARCH-02, ARCH-03, REL-02, REL-03, REL-04)
+- [ ] 02-02-PLAN.md -- Transcribe layer: per-provider httpx pool + Groq→OpenAI fallback + PERF-01 spans (REL-05, PERF-01)
 
 ### Phase 4: Parallel Encoding *(INSERTED 2026-05-13)*
 **Goal**: Cut perceived post-release latency by ~600–1000ms by encoding audio chunks into OGG/Opus while the user is still speaking, so the moment fn is released the encoder only needs to flush the tail before the API call.
@@ -110,6 +113,6 @@ than PyPI packaging, and Phase 3 doesn't depend on Phase 4 either way.)
 |-------|----------------|--------|-----------|
 | 1. Security & Safety | 3/3 | ✓ Done | 2026-04-22 |
 | 1.1. Security Hardening (Codex Review) | 5/5 | ✓ Done | 2026-04-29 |
-| 2. Architecture & Reliability + Latency Foundations | 0/TBD | Next up | - |
+| 2. Architecture & Reliability + Latency Foundations | 0/2 | Next up | - |
 | 4. Parallel Encoding | 0/TBD | Blocked on Phase 2 | - |
 | 3. Packaging & Distribution | 0/TBD | Blocked on Phase 2, 4 | - |
