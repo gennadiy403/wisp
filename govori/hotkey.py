@@ -122,8 +122,9 @@ def cg_event_callback(proxy, event_type, event, refcon):
     elif not is_down and prev_fn_down:
         now = time.time()
         held = now - _fn_press_time
+        fn_release_perf = time.perf_counter()
         with state.lock:
-            state.fn_release_ts = now
+            state.fn_release_ts = fn_release_perf
             recording = state.recording
         if held < 0.20:
             threading.Thread(

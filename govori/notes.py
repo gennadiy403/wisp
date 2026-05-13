@@ -17,7 +17,7 @@ except ImportError:
 from . import config as cfg
 from .hud import _tooltip, set_hud
 from .state import PERMANENT_API_ERROR, stash_retry_buffer
-from .transcribe import _is_hallucination, _transcribe_with_auto_retries
+from .transcribe import _is_hallucination, transcribe_with_fallback
 VALID_TYPES = {'idea', 'commitment', 'observation', 'todo', 'decision', 'question', 'other'}
 VALID_URGENCY = {'low', 'medium', 'high'}
 _anthropic_client = None
@@ -65,7 +65,7 @@ def _save_note_audio_background(audio, duration_sec):
 def _note_pipeline_background(audio, duration_sec):
     """Full note pipeline: transcribe -> filter -> classify -> save. No HUD updates."""
     threading.Thread(target=lambda a=audio, d=duration_sec: _save_note_audio_background(a, d), daemon=True).start()
-    text = _transcribe_with_auto_retries(audio, duration_sec)
+    text = transcribe_with_fallback(audio, duration_sec)
     if text is PERMANENT_API_ERROR:
         set_hud(True, mode='error_fatal', tooltip=_tooltip('api_network'))
         return

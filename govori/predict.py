@@ -7,13 +7,13 @@ from loguru import logger
 from . import config as cfg
 from .hud import set_hud
 from .macos import _delete_chars, paste_text
-from .transcribe import _get_openai_client
+from .transcribe import _get_predict_client
 _predict_controller = None
 
 def generate_rephrasings(text):
     """Generate 3 alternative phrasings of the given text, preserving meaning."""
     try:
-        resp = _get_openai_client().chat.completions.create(model=cfg.CONFIG.predict_model, messages=[{'role': 'system', 'content': 'You are a rephrasing assistant. Given a piece of text, produce 3 distinct alternative phrasings that preserve the original meaning but vary in wording, tone, or structure. Keep roughly the same length and the SAME language as the input. Do not add or remove information. Return JSON: {"rephrasings": ["...", "...", "..."]}'}, {'role': 'user', 'content': text}], response_format={'type': 'json_object'}, max_tokens=400, temperature=0.7)
+        resp = _get_predict_client().chat.completions.create(model=cfg.CONFIG.predict_model, messages=[{'role': 'system', 'content': 'You are a rephrasing assistant. Given a piece of text, produce 3 distinct alternative phrasings that preserve the original meaning but vary in wording, tone, or structure. Keep roughly the same length and the SAME language as the input. Do not add or remove information. Return JSON: {"rephrasings": ["...", "...", "..."]}'}, {'role': 'user', 'content': text}], response_format={'type': 'json_object'}, max_tokens=400, temperature=0.7)
         data = json.loads(resp.choices[0].message.content)
         items = data.get('rephrasings', [])
         if isinstance(items, list) and len(items) >= 1:

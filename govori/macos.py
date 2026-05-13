@@ -90,6 +90,11 @@ def perform_shutdown():
             stream.close()
         except Exception as e:
             logger.warning(f"Audio stream close failed: {e}")
+    try:
+        from . import transcribe
+        transcribe.close_clients()
+    except Exception as e:
+        logger.warning(f"Provider client close failed: {e}")
     logger.complete()
 
 
