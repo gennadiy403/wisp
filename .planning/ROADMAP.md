@@ -12,9 +12,10 @@ Govori's feature set is complete and competitive. This milestone hardens the exi
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Security & Safety** - Fix ship-blocking vulnerabilities and add safety guards for system-level APIs
-- [ ] **Phase 1.1: Security Hardening (Codex Review)** *(INSERTED 2026-05-05)* - Fix 9 issues found by cross-AI review of phase 01 implementation
-- [ ] **Phase 2: Architecture & Reliability** - Extract modules from monolith, replace globals with explicit state, add logging and graceful shutdown
+- [x] **Phase 1: Security & Safety** - Fix ship-blocking vulnerabilities and add safety guards for system-level APIs
+- [x] **Phase 1.1: Security Hardening (Codex Review)** *(INSERTED 2026-05-05)* - Fix 9 issues found by cross-AI review of phase 01 implementation
+- [ ] **Phase 2: Architecture & Reliability + Latency Foundations** - Extract modules from monolith, replace globals with explicit state, add logging and graceful shutdown. Plus: instrumentation, Groq/OpenAI fallback, connection pooling — natural fit since transcribe module is being extracted.
+- [ ] **Phase 4: Parallel Encoding** *(INSERTED 2026-05-13)* - Stream OGG/Opus encoding into a background queue during recording so post-release latency drops from ~2s to ~600ms
 - [ ] **Phase 3: Packaging & Distribution** - Package for PyPI, add smoke tests, publish with documentation
 
 ## Phase Details
@@ -49,27 +50,44 @@ Plans:
   6. Повторный Codex security-review с теми же критериями: 0 находок остаются open
 **Plans:** 5 plans
 Plans:
-- [ ] 01.1-01-PLAN.md -- API timeout 30s + permanent error classification (Claude)
-- [ ] 01.1-02-PLAN.md -- Retry single-flight + mode-aware dispatch (Codex via codex exec)
-- [ ] 01.1-03-PLAN.md -- Health-monitor cancel recording + ownership tracking (Codex via codex exec)
-- [ ] 01.1-04-PLAN.md -- Privacy notice corrections en+ru (Claude)
-- [ ] 01.1-05-PLAN.md -- Empty audio_chunks guard + CLI mic error handling (Claude)
+- [x] 01.1-01-PLAN.md -- API timeout 30s + permanent error classification (Claude)
+- [x] 01.1-02-PLAN.md -- Retry single-flight + mode-aware dispatch (Codex via codex exec)
+- [x] 01.1-03-PLAN.md -- Health-monitor cancel recording + ownership tracking (Codex via codex exec)
+- [x] 01.1-04-PLAN.md -- Privacy notice corrections en+ru (Claude)
+- [x] 01.1-05-PLAN.md -- Empty audio_chunks guard + CLI mic error handling (Claude)
 
-### Phase 2: Architecture & Reliability
-**Goal**: Govori runs as a proper Python package with isolated modules, explicit state, structured logging, and clean shutdown
+### Phase 2: Architecture & Reliability + Latency Foundations
+**Goal**: Govori runs as a proper Python package with isolated modules, explicit state, structured logging, clean shutdown — and the transcribe module gains observable latency timing, an OpenAI fallback path, and a pooled HTTP client.
 **Depends on**: Phase 1
-**Requirements**: ARCH-01, ARCH-02, ARCH-03, REL-02, REL-03, REL-04
+**Requirements**: ARCH-01, ARCH-02, ARCH-03, REL-02, REL-03, REL-04, PERF-01, REL-05
+**Background**: Spike 001 (`.planning/spikes/001-latency-benchmark/`) showed Groq p50=386ms / p95=705ms vs OpenAI p50=1476ms / p95=3416ms. Groq is already configured, so latency-from-API-swap is solved — but Groq drops ~5% requests, so a fallback is a reliability feature. The other ~1.5s of perceived pause is somewhere else (encoding / connection setup / paste) and needs measurement before Phase 4.
 **Success Criteria** (what must be TRUE):
   1. govori.py is replaced by a govori/ package with separate modules (config, state, hud, audio, transcribe, notes, macos, predict, cli)
   2. No mutable module-level globals -- application state lives in an AppState dataclass with explicit transitions
   3. All output goes to ~/.config/govori/govori.log via loguru with rotation -- no print() calls remain
   4. Ctrl+C or SIGTERM triggers clean shutdown: audio stream closed, no os._exit(0)
   5. Invalid config YAML produces a human-readable error message, not a silent empty dict
+  6. **PERF-01**: `stop_and_transcribe → encode → API → paste` chain is instrumented with `time.perf_counter()` and emits structured latency events to the log; running `./govori --bench-mode` (or similar) prints a final summary of per-stage timing
+  7. **REL-05**: When Groq returns 5xx / timeout / connection error, transcribe module automatically retries on OpenAI (whisper-1) if `OPENAI_API_KEY` is present; user-visible log shows which provider answered
+  8. Transcribe module reuses a single HTTP client per provider (keep-alive, connection pool) — no new TLS handshake per dictation
+**Plans**: TBD
+
+### Phase 4: Parallel Encoding *(INSERTED 2026-05-13)*
+**Goal**: Cut perceived post-release latency by ~600–1000ms by encoding audio chunks into OGG/Opus while the user is still speaking, so the moment fn is released the encoder only needs to flush the tail before the API call.
+**Depends on**: Phase 2 (needs the extracted transcribe module + AppState + logging to land cleanly)
+**Requirements**: PERF-02
+**Source**: `.planning/spikes/001-latency-benchmark/README.md` — bench measured API latency only; perceived 2s includes encoding + connection + paste, and parallel encoding is the highest-ROI target identified.
+**Success Criteria** (what must be TRUE):
+  1. **PERF-02**: After fn release, end-to-end latency (release → text pasted at cursor) drops below 1000ms on p50 and below 1500ms on p95 for dictations 4–25s long, measured by the PERF-01 instrumentation from Phase 2
+  2. PyAV OGG/Opus encoder runs in a background thread fed by an in-memory queue from `audio_callback`; `stop_and_transcribe` only flushes the tail and submits
+  3. Cancellation, retry, and note-mode paths still work: encoder is drained or discarded correctly on cancel; retry buffer holds raw audio (not the partial encode), so retries can re-encode from scratch
+  4. No regression in transcript text: same input → same text (within Groq's normal jitter) as before Phase 4 — verified by replaying the 8 bench .opus files
+  5. Memory bounded: encoder queue has a sensible upper bound (e.g., 60s of audio) and degrades gracefully if exceeded
 **Plans**: TBD
 
 ### Phase 3: Packaging & Distribution
 **Goal**: Users can install Govori via `pipx install govori` from PyPI with confidence it works
-**Depends on**: Phase 2
+**Depends on**: Phase 2, Phase 4
 **Requirements**: DIST-01, DIST-02, DIST-03, DIST-04, DOC-01, DOC-02
 **Success Criteria** (what must be TRUE):
   1. `pipx install govori` installs the tool with all dependencies and `govori` command works
@@ -82,10 +100,16 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3
+Phases execute in numeric order, with decimal insertions appearing between
+their surrounding integers: 1 → 1.1 → 2 → 4 → 3
+
+(Phase 4 inserted before Phase 3 because the latency win is more impactful
+than PyPI packaging, and Phase 3 doesn't depend on Phase 4 either way.)
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Security & Safety | 0/3 | Planned | - |
-| 2. Architecture & Reliability | 0/TBD | Not started | - |
-| 3. Packaging & Distribution | 0/TBD | Not started | - |
+| 1. Security & Safety | 3/3 | ✓ Done | 2026-04-22 |
+| 1.1. Security Hardening (Codex Review) | 5/5 | ✓ Done | 2026-04-29 |
+| 2. Architecture & Reliability + Latency Foundations | 0/TBD | Next up | - |
+| 4. Parallel Encoding | 0/TBD | Blocked on Phase 2 | - |
+| 3. Packaging & Distribution | 0/TBD | Blocked on Phase 2, 4 | - |
