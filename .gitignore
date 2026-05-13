@@ -40,3 +40,6 @@ dist/
 # Claude Code agent worktrees (ephemeral, never commit)
 .claude/worktrees/
 .claude/settings.local.json
+
+# Bench artifacts (transcripts may contain user voice content)
+bench/results.json
