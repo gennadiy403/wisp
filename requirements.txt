@@ -5,5 +5,7 @@ soundfile
 numpy
 av
 pyyaml
+loguru
+pydantic
 pyobjc-framework-Cocoa
 pyobjc-framework-Quartz
